@@ -1,0 +1,14 @@
+[package]
+name = "audio-learn"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cpal = "0.17.3"
+hound = "3.5.1"
+anyhow = "1.0.102"
+rand = "0.10.0"
+rubato = "1.0.1"
+audioadapter-buffers = "2.0.0"
+ringbuf = "0.4.8"
+symphonia = {  version ="0.5.5", features = ["mp3"] }
