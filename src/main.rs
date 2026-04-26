@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 fn main()  {
    // play_sample_on_device().expect("failed");
    stream_mp3_file("files/lost_in_the_city.mp3");
+
 }
 
 fn play_sample_on_device() -> Result<(), anyhow::Error> {
