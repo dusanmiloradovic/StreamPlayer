@@ -8,12 +8,15 @@ use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use crate::stream_player::{new_stream_player, StreamPlayer};
 
 pub fn stream_mp3_file(file_path: &str) {
     let src = File::open(file_path).expect("failed to open file");
     let mss = MediaSourceStream ::new(Box::new(src), Default::default());  // Create a probe hint using the file's extension. [Optional]
     let mut hint = Hint::new();
     hint.with_extension("mp3");
+
+
 
     // Use the default options for metadata and format readers.
     let meta_opts: MetadataOptions = Default::default();
@@ -61,7 +64,9 @@ pub fn stream_mp3_file(file_path: &str) {
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &dec_opts)
         .expect("unsupported codec");
+    let mut stream_player = new_stream_player(*sample_rate, track_channels_size as u16);
 
+    stream_player.start();
     loop {
         // Get the next packet from the media format.
         let packet = match format.next_packet() {
@@ -78,6 +83,7 @@ pub fn stream_mp3_file(file_path: &str) {
                 {
                     // End of stream reached, exit the decode loop.
                     println!("End of stream reached.");
+                    stream_player.stop();
                     break;
                 }
             Err(err) => {
@@ -115,6 +121,7 @@ pub fn stream_mp3_file(file_path: &str) {
                 if let Some(buf) = &mut sample_buf {
                     buf.copy_interleaved_ref(_decoded);
                     let b =buf.samples();
+                    stream_player.push_samples(b);
 
                     // // The samples may now be access via the `samples()` function.
                     // sample_count += buf.samples().len();

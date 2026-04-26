@@ -10,7 +10,7 @@ pub trait StreamPlayer {
     fn push_samples(&mut self, sample: &[f32]);
 }
 
-struct StreamPlayerImpl {
+pub struct StreamPlayerImpl {
     audio_sample_rate: u32,
     default_sample_rate: u32,
     channels: u16,
@@ -18,6 +18,10 @@ struct StreamPlayerImpl {
     producer: Option<HeapProd<f32>>,
 }
 
+
+pub fn new_stream_player(audio_sample_rate: u32, channels: u16) -> StreamPlayerImpl {
+    StreamPlayerImpl::new(audio_sample_rate, channels)
+}
 
 impl StreamPlayer for StreamPlayerImpl {
     fn new(audio_sample_rate: u32, channels: u16) -> Self {
@@ -40,7 +44,10 @@ impl StreamPlayer for StreamPlayerImpl {
         self.stop_channel_sender = None;
     }
     fn start(&mut self) {
-        let (producer, mut consumer) = HeapRb::<f32>::new(1024).split();
+        let target_latency_secs = 1f32;
+        let raw_size = (self.default_sample_rate as f32 * self.channels as f32 * target_latency_secs) as usize;
+        let ring_size = raw_size.next_power_of_two();
+        let (producer, mut consumer) = HeapRb::<f32>::new(ring_size).split();
         self.producer = Some(producer);
         let data_callback = move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
             for sample in out.iter_mut() {
@@ -69,13 +76,24 @@ impl StreamPlayer for StreamPlayerImpl {
         stream.play().expect("failed to start stream");
         let (stop_channel_sender, stop_channel_receiver) = mpsc::channel::<()>();
         self.stop_channel_sender = Some(stop_channel_sender);
-        stop_channel_receiver.recv().unwrap();
+        std::thread::spawn(move || {
+            let _stream=stream;
+            stop_channel_receiver.recv().unwrap();
+        });
     }
 
     fn push_samples(&mut self, sample: &[f32]) {
         // TODO samples rate adjust with Rubato
         if let Some(producer) = self.producer.as_mut() {
-            producer.push_slice(sample);
+            let mut offset = 0;
+            while offset < sample.len() {
+                let pushed = producer.push_slice(&sample[offset..]);
+                offset += pushed;
+                if offset < sample.len() {
+                    // Ring buffer full — pace the decoder to real-time playback speed
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
         }
     }
 }
