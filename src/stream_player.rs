@@ -1,6 +1,6 @@
 use audioadapter_buffers::direct::InterleavedSlice;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{default_host, StreamError};
+use cpal::{default_host, StreamError, SupportedStreamConfig};
 use ringbuf::{traits::*, HeapProd, HeapRb};
 use rubato::{Fft, FixedSync, Resampler};
 use std::sync::mpsc;
@@ -22,6 +22,7 @@ pub struct StreamPlayerImpl {
     producer: Option<HeapProd<f32>>,
     resampler: Option<Fft<f32>>,
     input_buffer: Vec<f32>,
+    config:SupportedStreamConfig,
 }
 
 pub fn new_stream_player(audio_sample_rate: u32, channels: u16) -> StreamPlayerImpl {
@@ -43,8 +44,16 @@ impl StreamPlayer for StreamPlayerImpl {
     fn new(audio_sample_rate: u32, channels: u16) -> Self {
         let host = default_host();
         let default_device = host.default_output_device().unwrap();
-        let default_config = default_device.default_output_config().unwrap();
-        let default_sample_rate = default_config.sample_rate();
+        // let default_config = default_device.default_output_config().unwrap();
+        // let default_sample_rate = default_config.sample_rate();
+
+        let config = default_device
+            .supported_output_configs()
+            .expect("failed to query output configs")
+            .find(|c| c.channels() == channels)
+            .expect("no output config found for the requested channel count")
+            .with_max_sample_rate();
+        let default_sample_rate = config.sample_rate();
 
         let resampler = if audio_sample_rate != default_sample_rate {
             Some(
@@ -70,6 +79,7 @@ impl StreamPlayer for StreamPlayerImpl {
             producer: None,
             resampler,
             input_buffer: Vec::new(),
+            config,
         }
     }
 
@@ -95,9 +105,9 @@ impl StreamPlayer for StreamPlayerImpl {
         let err_fn = |err: StreamError| eprintln!("an error occurred on stream: {err}");
         let host = default_host();
         let device = host.default_output_device().expect("no output device found");
-        let config = device.default_output_config().expect("no default output config");
+
         let stream = device
-            .build_output_stream(&config.into(), data_callback, err_fn, None)
+            .build_output_stream(&self.config.config(), data_callback, err_fn, None)
             .expect("failed to build stream");
         stream.play().expect("failed to start stream");
 
