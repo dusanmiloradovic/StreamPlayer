@@ -39,9 +39,6 @@ pub fn stream_mp3_file(file_path: &str) {
 
     let track = format.default_track().expect("no audio track");
     let track_id = track.id;
-    println!("Hey,{}", track_id);
-
-
 
     let dec_opts: DecoderOptions = Default::default();
 
@@ -68,14 +65,9 @@ pub fn stream_mp3_file(file_path: &str) {
 
     stream_player.start();
     loop {
-        // Get the next packet from the media format.
         let packet = match format.next_packet() {
             Ok(packet) => packet,
             Err(Error::ResetRequired) => {
-                // The track list has been changed. Re-examine it and create a new set of decoders,
-                // then restart the decode loop. This is an advanced feature and it is not
-                // unreasonable to consider this "the end." As of v0.5.0, the only usage of this is
-                // for chained OGG physical streams.
                 unimplemented!();
             }
             Err(Error::IoError(err))
@@ -110,11 +102,9 @@ pub fn stream_mp3_file(file_path: &str) {
         // Decode the packet into audio samples.
         match decoder.decode(&packet) {
             Ok(_decoded) => {
-
                 if sample_buf.is_none() {
                     let spec = *_decoded.spec();
                     let capacity = _decoded.capacity() as u64; // same as Duration type for SampleBuffer
-
                     sample_buf = Some(SampleBuffer::<f32>::new(capacity, spec));
                     println!("Decoded packet with spec: {:?}, capacity: {}", spec, capacity);
                 }
@@ -122,10 +112,6 @@ pub fn stream_mp3_file(file_path: &str) {
                     buf.copy_interleaved_ref(_decoded);
                     let b =buf.samples();
                     stream_player.push_samples(b);
-
-                    // // The samples may now be access via the `samples()` function.
-                    // sample_count += buf.samples().len();
-                    // print!("\rDecoded {} samples", sample_count);
                 }
             }
             Err(Error::IoError(_)) => {
