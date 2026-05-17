@@ -3,7 +3,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{default_host, StreamError, SupportedStreamConfig};
 use ringbuf::{traits::*, HeapProd, HeapRb};
 use rubato::{Fft, FixedSync, Resampler};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
+use std::sync::atomic::AtomicUsize;
 
 pub trait StreamPlayer {
     fn new(audio_sample_rate: u32, channels: u16) -> Self;
@@ -96,10 +97,15 @@ impl StreamPlayer for StreamPlayerImpl {
         let ring_size = raw_size.next_power_of_two();
         let (producer, mut consumer) = HeapRb::<f32>::new(ring_size).split();
         self.producer = Some(producer);
+        let sample_counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&sample_counter);
+        // TODO sample counter to struct, so it can be shared
+        // that is where the playing time will be calculated
 
         let data_callback = move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
             for sample in out.iter_mut() {
                 *sample = consumer.try_pop().unwrap_or(0.0);
+                counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         };
         let err_fn = |err: StreamError| eprintln!("an error occurred on stream: {err}");
