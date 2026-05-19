@@ -159,6 +159,39 @@ impl StreamPlayer for StreamPlayerImpl {
                 push_with_backpressure(self.producer.as_mut().unwrap(), resampled);
                 self.input_buffer.drain(..samples_per_chunk);
             }
+
+            // Process any remaining samples by zero-padding to a full chunk
+            if !self.input_buffer.is_empty() {
+                let remaining = self.input_buffer.len();
+                self.input_buffer.resize(samples_per_chunk, 0.0);
+
+                let max_out_frames = self.resampler.as_ref().unwrap().output_frames_max();
+                let mut outdata = vec![0.0f32; max_out_frames * ch];
+
+                let actual_out_frames = {
+                    let input_adapter = InterleavedSlice::new(&self.input_buffer, ch, CHUNK_SIZE)
+                        .expect("failed to create input adapter");
+                    let mut output_adapter =
+                        InterleavedSlice::new_mut(&mut outdata, ch, max_out_frames)
+                            .expect("failed to create output adapter");
+                    self.resampler
+                        .as_mut()
+                        .unwrap()
+                        .process_into_buffer(&input_adapter, &mut output_adapter, None)
+                        .expect("resampling failed")
+                        .1
+                };
+
+                // Only output frames corresponding to the actual (non-padded) input
+                let ratio = self.default_sample_rate as f64 / self.audio_sample_rate as f64;
+                let remaining_frames = remaining / ch;
+                let expected_out_frames =
+                    (remaining_frames as f64 * ratio).ceil() as usize;
+                let out_frames = expected_out_frames.min(actual_out_frames);
+                let resampled = &outdata[..out_frames * ch];
+                push_with_backpressure(self.producer.as_mut().unwrap(), resampled);
+                self.input_buffer.clear();
+            }
         } else {
             push_with_backpressure(self.producer.as_mut().unwrap(), samples);
         }

@@ -11,6 +11,8 @@ pub enum StreamErr {
     UnsupportedChannelCount,
     UnsupportedCodec,
     UnknownError,
+    QueryOutputDeviceError,
+    NoDeviceConfigForChannelCount,
 }
 pub trait Sink {
     fn push(&mut self, data: &[f32]);
@@ -19,7 +21,7 @@ pub trait Sink {
 }
 
 pub trait Streamer {
-    fn play(self) -> Result<(), StreamErr>;
+    fn play(&mut self) -> Result<(), StreamErr>;
     fn pause(&mut self) -> Result<(), StreamErr>;
     fn stop(self) -> Result<(), StreamErr>;
     fn seek(self, time: u64) -> Result<(), StreamErr>;
