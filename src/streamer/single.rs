@@ -14,7 +14,7 @@ use symphonia::core::probe::Hint;
 const CHUNK_SIZE: usize = 1024;
 
 struct SingleStreamer {
-    media_source: Box<dyn MediaSource>,
+    media_source: Option<Box<dyn MediaSource>>,
     mime_type: String,
     paused: bool,
     resampler: Option<Fft<f32>>,
@@ -25,7 +25,7 @@ struct SingleStreamer {
 impl SingleStreamer {
     pub fn new(source: Box<dyn MediaSource>, mime_type: String) -> Self {
         Self {
-            media_source: source,
+            media_source: Some(source),
             mime_type,
             paused: false,
             resampler: None,
@@ -96,16 +96,16 @@ impl SingleStreamer {
             Ok(())
         } else {
             self.get_sink().unwrap().push(samples);
-            Ok((()))
+            Ok(())
         }
     }
 }
 
 impl Streamer for SingleStreamer {
-    fn play(&mut self) -> Result<(), StreamErr> {
+    fn play(mut self) -> Result<(), StreamErr> {
         let mut sink = self.get_sink().ok_or(StreamErr::NoSink)?;
 
-        let mss = MediaSourceStream::new(self.media_source, Default::default());
+        let mss = MediaSourceStream::new(self.media_source.take().unwrap(), Default::default());
         let mut hint = Hint::new();
         hint.mime_type(&self.mime_type);
         // Use the default options for metadata and format readers.
@@ -135,12 +135,12 @@ impl Streamer for SingleStreamer {
 
         let dec_opts: DecoderOptions = Default::default();
 
-        let Some(sample_rate) = &track.codec_params.sample_rate else {
+        let Some(sample_rate) = track.codec_params.sample_rate else {
             return Err(StreamErr::NoSampleRate);
         };
 
-        let channels = &track.codec_params.channels.unwrap();
-        let track_channels_size = channels.count();
+        let channels = track.codec_params.channels.unwrap();
+        let track_channels_size = channels.count() as u16;
 
         let host = default_host();
         let _device = host.default_output_device();
@@ -199,7 +199,7 @@ impl Streamer for SingleStreamer {
                     if let Some(buf) = &mut sample_buf {
                         buf.copy_interleaved_ref(_decoded);
                         let b = buf.samples();
-                        self.resample(*sample_rate,2,b)?;
+                        self.resample(sample_rate, track_channels_size, b)?;
                     }
                 }
                 Err(Error::IoError(_)) => {
