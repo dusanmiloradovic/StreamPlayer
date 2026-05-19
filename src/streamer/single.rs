@@ -1,10 +1,10 @@
+use crate::streamer::{Sink, StreamErr, Streamer};
 use cpal::default_host;
 use cpal::traits::{DeviceTrait, HostTrait};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error;
 use symphonia::core::formats::FormatOptions;
-use crate::streamer::{Sink, StreamErr, Streamer};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
@@ -12,6 +12,7 @@ use symphonia::core::probe::Hint;
 struct SingleStreamer {
     media_source: Box<dyn MediaSource>,
     mime_type: String,
+    paused: bool,
 }
 
 impl SingleStreamer {
@@ -19,6 +20,7 @@ impl SingleStreamer {
         Self {
             media_source: source,
             mime_type,
+            paused: false,
         }
     }
 }
@@ -35,9 +37,10 @@ impl Streamer for SingleStreamer {
         let fmt_opts: FormatOptions = Default::default();
 
         // Probe the media source.
-        let mut probed = symphonia::default::get_probe()
-            .format(&hint, mss, &fmt_opts, &meta_opts)
-            .expect("unsupported format");
+        let  _probed = symphonia::default::get_probe().format(&hint, mss, &fmt_opts, &meta_opts);
+        let Ok(mut probed) = _probed else {
+            return Err(StreamErr::UnsupportedFormat);
+        };
 
         if let Some(metadata_rev) = probed.metadata.get().as_ref().and_then(|m| m.current()) {
             for tag in metadata_rev.tags() {
@@ -48,27 +51,34 @@ impl Streamer for SingleStreamer {
         let mut format = probed.format;
         let mut sample_buf = None;
 
-
-        let track = format.default_track().expect("no audio track");
+        let _track = format.default_track();
+        let Some(track) = _track else{
+            return Err(StreamErr::NoAudioTrack);
+        };
         let track_id = track.id;
 
         let dec_opts: DecoderOptions = Default::default();
 
-        let Some(sample_rate) = &track.codec_params.sample_rate else{
-            panic!("no sample rate");
+        let Some(sample_rate) = &track.codec_params.sample_rate else {
+            return Err(StreamErr::NoSampleRate);
         };
 
-        let channels= &track.codec_params.channels.unwrap();
-        let track_channels_size =  channels.count();
+        let channels = &track.codec_params.channels.unwrap();
+        let track_channels_size = channels.count();
 
         let host = default_host();
-        let device = host.default_output_device().expect("no output device found");
+        let _device = host
+            .default_output_device();
+        let Some(device) = _device else{
+            return Err(StreamErr::NoOutputDevice)
+        };
+
         let supported = device
             .supported_output_configs()
             .expect("error querying output configs")
             .any(|config| config.channels() == track_channels_size as u16);
         if !supported {
-            panic!("device does not support this channel count");
+            return Err(StreamErr::UnsupportedChannelCount);
         }
         let mut decoder = symphonia::default::get_codecs()
             .make(&track.codec_params, &dec_opts)
@@ -77,19 +87,16 @@ impl Streamer for SingleStreamer {
             let packet = match format.next_packet() {
                 Ok(packet) => packet,
                 Err(Error::ResetRequired) => {
-                    unimplemented!();
+                    return Err(StreamErr::UnknownError);
                 }
-                Err(Error::IoError(err))
-                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
-                    {
-                        // End of stream reached, exit the decode loop.
-                        println!("End of stream reached.");
-                        stream_player.stop();
-                        break;
-                    }
+                Err(Error::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    sink.stop();
+                    break;
+                }
                 Err(err) => {
                     // A unrecoverable error occurred, halt decoding.
-                    panic!("{}", err);
+                    eprintln!("Packet read error debug: {:#?}", err);
+                    return Err(StreamErr::UnknownError);
                 }
             };
 
@@ -106,8 +113,6 @@ impl Streamer for SingleStreamer {
                 continue;
             }
 
-
-
             // Decode the packet into audio samples.
             match decoder.decode(&packet) {
                 Ok(_decoded) => {
@@ -115,11 +120,14 @@ impl Streamer for SingleStreamer {
                         let spec = *_decoded.spec();
                         let capacity = _decoded.capacity() as u64; // same as Duration type for SampleBuffer
                         sample_buf = Some(SampleBuffer::<f32>::new(capacity, spec));
-                        println!("Decoded packet with spec: {:?}, capacity: {}", spec, capacity);
+                        println!(
+                            "Decoded packet with spec: {:?}, capacity: {}",
+                            spec, capacity
+                        );
                     }
                     if let Some(buf) = &mut sample_buf {
                         buf.copy_interleaved_ref(_decoded);
-                        let b =buf.samples();
+                        let b = buf.samples();
                         sink.push(b);
                         //TODO interleave first
                     }
@@ -133,16 +141,16 @@ impl Streamer for SingleStreamer {
                     continue;
                 }
                 Err(err) => {
-                    // An unrecoverable error occurred, halt decoding.
-                    panic!("{}", err);
+                    return Err(StreamErr::UnknownError);
                 }
             }
         }
         Ok(())
     }
 
-    fn pause(self) -> Result<(), StreamErr> {
-        todo!()
+    fn pause(&mut self) -> Result<(), StreamErr> {
+        self.paused = true;
+        Ok(())
     }
 
     fn stop(self) -> Result<(), StreamErr> {
