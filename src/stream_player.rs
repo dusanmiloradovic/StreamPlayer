@@ -1,13 +1,11 @@
-use audioadapter_buffers::direct::InterleavedSlice;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{default_host, StreamError, SupportedStreamConfig};
 use ringbuf::{traits::*, HeapProd, HeapRb};
-use rubato::{Fft, FixedSync, Resampler};
-use std::sync::{mpsc, Arc};
 use std::sync::atomic::AtomicUsize;
+use std::sync::{mpsc, Arc};
 
 pub trait StreamPlayer {
-    fn new(audio_sample_rate: u32, channels: u16) -> Self;
+    fn new(channels: u16) -> Self;
     fn stop(&mut self);
     fn start(&mut self);
     fn push_samples(&mut self, sample: &[f32]);
@@ -16,18 +14,15 @@ pub trait StreamPlayer {
 const CHUNK_SIZE: usize = 1024;
 
 pub struct StreamPlayerImpl {
-    audio_sample_rate: u32,
     default_sample_rate: u32,
     channels: u16,
     stop_channel_sender: Option<mpsc::Sender<()>>,
     producer: Option<HeapProd<f32>>,
-    resampler: Option<Fft<f32>>,
-    input_buffer: Vec<f32>,
-    config:SupportedStreamConfig,
+    config: SupportedStreamConfig,
 }
 
-pub fn new_stream_player(audio_sample_rate: u32, channels: u16) -> StreamPlayerImpl {
-    StreamPlayerImpl::new(audio_sample_rate, channels)
+pub fn new_stream_player( channels: u16) -> StreamPlayerImpl {
+    StreamPlayerImpl::new( channels)
 }
 
 fn push_with_backpressure(producer: &mut HeapProd<f32>, data: &[f32]) {
@@ -42,7 +37,7 @@ fn push_with_backpressure(producer: &mut HeapProd<f32>, data: &[f32]) {
 }
 
 impl StreamPlayer for StreamPlayerImpl {
-    fn new(audio_sample_rate: u32, channels: u16) -> Self {
+    fn new( channels: u16) -> Self {
         let host = default_host();
         let default_device = host.default_output_device().unwrap();
         // let default_config = default_device.default_output_config().unwrap();
@@ -56,30 +51,12 @@ impl StreamPlayer for StreamPlayerImpl {
             .with_max_sample_rate();
         let default_sample_rate = config.sample_rate();
 
-        let resampler = if audio_sample_rate != default_sample_rate {
-            Some(
-                Fft::<f32>::new(
-                    audio_sample_rate as usize,
-                    default_sample_rate as usize,
-                    CHUNK_SIZE,
-                    2,
-                    channels as usize,
-                    FixedSync::Input,
-                )
-                .expect("failed to create resampler"),
-            )
-        } else {
-            None
-        };
 
         Self {
-            audio_sample_rate,
             channels,
             default_sample_rate,
             stop_channel_sender: None,
             producer: None,
-            resampler,
-            input_buffer: Vec::new(),
             config,
         }
     }
@@ -110,7 +87,9 @@ impl StreamPlayer for StreamPlayerImpl {
         };
         let err_fn = |err: StreamError| eprintln!("an error occurred on stream: {err}");
         let host = default_host();
-        let device = host.default_output_device().expect("no output device found");
+        let device = host
+            .default_output_device()
+            .expect("no output device found");
 
         let stream = device
             .build_output_stream(&self.config.config(), data_callback, err_fn, None)
@@ -130,70 +109,6 @@ impl StreamPlayer for StreamPlayerImpl {
             return;
         }
 
-        if self.resampler.is_some() {
-            self.input_buffer.extend_from_slice(samples);
-
-            let ch = self.channels as usize;
-            let samples_per_chunk = CHUNK_SIZE * ch;
-
-            while self.input_buffer.len() >= samples_per_chunk {
-                let max_out_frames = self.resampler.as_ref().unwrap().output_frames_max();
-                let mut outdata = vec![0.0f32; max_out_frames * ch];
-
-                let actual_out_frames = {
-                    let chunk = &self.input_buffer[..samples_per_chunk];
-                    let input_adapter = InterleavedSlice::new(chunk, ch, CHUNK_SIZE)
-                        .expect("failed to create input adapter");
-                    let mut output_adapter =
-                        InterleavedSlice::new_mut(&mut outdata, ch, max_out_frames)
-                            .expect("failed to create output adapter");
-                    self.resampler
-                        .as_mut()
-                        .unwrap()
-                        .process_into_buffer(&input_adapter, &mut output_adapter, None)
-                        .expect("resampling failed")
-                        .1
-                };
-
-                let resampled = &outdata[..actual_out_frames * ch];
-                push_with_backpressure(self.producer.as_mut().unwrap(), resampled);
-                self.input_buffer.drain(..samples_per_chunk);
-            }
-
-            // Process any remaining samples by zero-padding to a full chunk
-            if !self.input_buffer.is_empty() {
-                let remaining = self.input_buffer.len();
-                self.input_buffer.resize(samples_per_chunk, 0.0);
-
-                let max_out_frames = self.resampler.as_ref().unwrap().output_frames_max();
-                let mut outdata = vec![0.0f32; max_out_frames * ch];
-
-                let actual_out_frames = {
-                    let input_adapter = InterleavedSlice::new(&self.input_buffer, ch, CHUNK_SIZE)
-                        .expect("failed to create input adapter");
-                    let mut output_adapter =
-                        InterleavedSlice::new_mut(&mut outdata, ch, max_out_frames)
-                            .expect("failed to create output adapter");
-                    self.resampler
-                        .as_mut()
-                        .unwrap()
-                        .process_into_buffer(&input_adapter, &mut output_adapter, None)
-                        .expect("resampling failed")
-                        .1
-                };
-
-                // Only output frames corresponding to the actual (non-padded) input
-                let ratio = self.default_sample_rate as f64 / self.audio_sample_rate as f64;
-                let remaining_frames = remaining / ch;
-                let expected_out_frames =
-                    (remaining_frames as f64 * ratio).ceil() as usize;
-                let out_frames = expected_out_frames.min(actual_out_frames);
-                let resampled = &outdata[..out_frames * ch];
-                push_with_backpressure(self.producer.as_mut().unwrap(), resampled);
-                self.input_buffer.clear();
-            }
-        } else {
-            push_with_backpressure(self.producer.as_mut().unwrap(), samples);
-        }
+        push_with_backpressure(self.producer.as_mut().unwrap(), samples);
     }
 }

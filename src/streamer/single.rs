@@ -20,6 +20,8 @@ struct SingleStreamer {
     resampler: Option<Fft<f32>>,
     checked_need_resampling: bool,
     resampling_buffer: Vec<f32>,
+    sink: Option<Box<dyn Sink>>,
+    default_sample_rate: u32,
 }
 
 impl SingleStreamer {
@@ -31,6 +33,8 @@ impl SingleStreamer {
             resampler: None,
             checked_need_resampling: false,
             resampling_buffer: Vec::new(),
+            sink: None,
+            default_sample_rate: 0
         }
     }
     fn resample(
@@ -50,6 +54,7 @@ impl SingleStreamer {
                 .ok_or_else(|| StreamErr::NoDeviceConfigForChannelCount)?
                 .with_max_sample_rate();
             let default_sample_rate = config.sample_rate();
+            self.default_sample_rate = default_sample_rate;
             if default_sample_rate != input_sample_rate {
                 self.resampler = Fft::<f32>::new(
                     input_sample_rate as usize,
@@ -69,33 +74,64 @@ impl SingleStreamer {
             while !self.resampling_buffer.is_empty() {
                 let max_out_frames = self.resampler.as_ref().unwrap().output_frames_max();
                 let mut outdata = vec![0.0f32; max_out_frames * input_channels as usize];
+                if self.resampling_buffer.len() >= samples_per_chunk {
+                    let actual_out_frames = {
+                        let chunk = &self.resampling_buffer[..samples_per_chunk];
+                        let input_adapter =
+                            InterleavedSlice::new(chunk, input_channels as usize, CHUNK_SIZE)
+                                .or_else(|_| Err(StreamErr::ResamplingError))?;
+                        let mut output_adapter = InterleavedSlice::new_mut(
+                            &mut outdata,
+                            input_channels as usize,
+                            max_out_frames,
+                        )
+                        .expect("failed to create output adapter");
+                        self.resampler
+                            .as_mut()
+                            .unwrap()
+                            .process_into_buffer(&input_adapter, &mut output_adapter, None)
+                            .or_else(|_| Err(StreamErr::ResamplingError))?
+                            .1
+                    };
 
-                let actual_out_frames = {
-                    let chunk = &self.resampling_buffer[..samples_per_chunk];
-                    let input_adapter =
-                        InterleavedSlice::new(chunk, input_channels as usize, CHUNK_SIZE)
-                            .expect("failed to create input adapter");
-                    let mut output_adapter = InterleavedSlice::new_mut(
-                        &mut outdata,
-                        input_channels as usize,
-                        max_out_frames,
-                    )
-                    .expect("failed to create output adapter");
-                    self.resampler
-                        .as_mut()
-                        .unwrap()
-                        .process_into_buffer(&input_adapter, &mut output_adapter, None)
-                        .expect("resampling failed")
-                        .1
-                };
+                    let resampled = &outdata[..actual_out_frames * input_channels as usize];
+                    self.sink.as_mut().ok_or(StreamErr::NoSink)?.push(resampled);
+                    self.resampling_buffer.drain(..samples_per_chunk);
+                } else {
+                    let remaining = self.resampling_buffer.len();
+                    self.resampling_buffer.resize(samples_per_chunk, 0.0);
 
-                let resampled = &outdata[..actual_out_frames * input_channels as usize];
-                self.get_sink().unwrap().push(resampled);
-                self.resampling_buffer.drain(..samples_per_chunk);
+                    let actual_out_frames = {
+                        let input_adapter = InterleavedSlice::new(
+                            &self.resampling_buffer,
+                            input_channels as usize,
+                            CHUNK_SIZE,
+                        )
+                            .or_else(|_| Err(StreamErr::ResamplingError))?;
+                        let mut output_adapter =
+                            InterleavedSlice::new_mut(&mut outdata, input_channels as usize, max_out_frames)
+                                .or_else(|_| Err(StreamErr::ResamplingError))?;
+                        self.resampler
+                            .as_mut()
+                            .unwrap()
+                            .process_into_buffer(&input_adapter, &mut output_adapter, None)
+                            .or_else(|_| Err(StreamErr::ResamplingError))?
+                            .1
+                    };
+
+                    // Only output frames corresponding to the actual (non-padded) input
+                    let ratio = self.default_sample_rate as f64 / input_sample_rate as f64;
+                    let remaining_frames = remaining / input_channels as usize;
+                    let expected_out_frames = (remaining_frames as f64 * ratio).ceil() as usize;
+                    let out_frames = expected_out_frames.min(actual_out_frames);
+                    let resampled = &outdata[..out_frames * input_channels as usize];
+                    self.sink.as_mut().ok_or(StreamErr::NoSink)?.push(resampled);
+                    self.resampling_buffer.clear();
+                }
             }
             Ok(())
         } else {
-            self.get_sink().unwrap().push(samples);
+
             Ok(())
         }
     }
@@ -103,7 +139,9 @@ impl SingleStreamer {
 
 impl Streamer for SingleStreamer {
     fn play(mut self) -> Result<(), StreamErr> {
-        let mut sink = self.get_sink().ok_or(StreamErr::NoSink)?;
+        if self.sink.is_none() {
+            return Err(StreamErr::NoSink);
+        }
 
         let mss = MediaSourceStream::new(self.media_source.take().unwrap(), Default::default());
         let mut hint = Hint::new();
@@ -165,7 +203,7 @@ impl Streamer for SingleStreamer {
                     return Err(StreamErr::UnknownError);
                 }
                 Err(Error::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    sink.stop();
+                    self.sink.as_mut().unwrap().stop();
                     break;
                 }
                 Err(err) => {
@@ -231,7 +269,7 @@ impl Streamer for SingleStreamer {
         todo!()
     }
 
-    fn get_sink(&self) -> Option<Box<dyn Sink>> {
-        todo!()
+    fn set_sink(&mut self, sink: Box<dyn Sink>) {
+        self.sink = Some(sink);
     }
 }
