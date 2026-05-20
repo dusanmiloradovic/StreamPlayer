@@ -227,17 +227,14 @@ impl Streamer for SingleStreamer {
                     }
                     if let Some(buf) = &mut sample_buf {
                         buf.copy_interleaved_ref(_decoded);
-                        let b = buf.samples();
-                        let input_sample_rate = self.input_sample_rate;
-                        let channels_size = self.channels_size;
                         resample(
                             &mut self.default_sample_rate,
                             &mut self.resampler,
                             &mut self.resampling_buffer,
                             &mut self.sink,
-                            input_sample_rate,
-                            channels_size,
-                            b,
+                            self.input_sample_rate,
+                            self.channels_size,
+                            buf.samples(),
                         )?;
                     }
                 }
