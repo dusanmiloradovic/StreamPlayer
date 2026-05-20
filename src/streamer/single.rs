@@ -4,16 +4,16 @@ use cpal::default_host;
 use cpal::traits::{DeviceTrait, HostTrait};
 use rubato::{Fft, FixedSync, Resampler};
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions};
+use symphonia::core::codecs::{CodecParameters, DecoderOptions};
 use symphonia::core::errors::Error;
-use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::formats::{FormatOptions};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::{Hint, ProbeResult};
 
 const CHUNK_SIZE: usize = 1024;
 
-struct SingleStreamer {
+pub struct SingleStreamer {
     mime_type: String,
     paused: bool,
     resampler: Option<Fft<f32>>,
@@ -246,7 +246,7 @@ impl Streamer for SingleStreamer {
                     // The packet failed to decode due to invalid data, skip the packet.
                     continue;
                 }
-                Err(err) => {
+                Err(_) => {
                     return Err(StreamErr::UnknownError);
                 }
             }
@@ -269,5 +269,13 @@ impl Streamer for SingleStreamer {
 
     fn set_sink(&mut self, sink: Box<dyn Sink>) {
         self.sink = Some(sink);
+    }
+
+    fn get_input_sample_rate(&self) -> u32 {
+        self.input_sample_rate
+    }
+
+    fn get_input_channel_count(&self) -> u16 {
+        self.channels_size
     }
 }

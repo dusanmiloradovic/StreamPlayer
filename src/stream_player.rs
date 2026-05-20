@@ -1,11 +1,12 @@
+use audio_learn::streamer::{Sink, Streamer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{default_host, StreamError, SupportedStreamConfig};
-use ringbuf::{traits::*, HeapProd, HeapRb};
+use cpal::{StreamError, SupportedStreamConfig, default_host};
+use ringbuf::{HeapProd, HeapRb, traits::*};
 use std::sync::atomic::AtomicUsize;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 
 pub trait StreamPlayer {
-    fn new(channels: u16) -> Self;
+    fn new(streamer: Box<dyn Streamer>) -> Self;
     fn stop(&mut self);
     fn start(&mut self);
     fn push_samples(&mut self, sample: &[f32]);
@@ -21,8 +22,8 @@ pub struct StreamPlayerImpl {
     config: SupportedStreamConfig,
 }
 
-pub fn new_stream_player( channels: u16) -> StreamPlayerImpl {
-    StreamPlayerImpl::new( channels)
+pub fn new_stream_player(streamer: &dyn Streamer) -> StreamPlayerImpl {
+    StreamPlayerImpl::new(streamer)
 }
 
 fn push_with_backpressure(producer: &mut HeapProd<f32>, data: &[f32]) {
@@ -36,8 +37,9 @@ fn push_with_backpressure(producer: &mut HeapProd<f32>, data: &[f32]) {
     }
 }
 
-impl StreamPlayer for StreamPlayerImpl {
-    fn new( channels: u16) -> Self {
+impl StreamPlayerImpl{
+    fn new(streamer: &dyn Streamer) -> Self {
+        let channels = streamer.get_input_channel_count();
         let host = default_host();
         let default_device = host.default_output_device().unwrap();
         // let default_config = default_device.default_output_config().unwrap();
@@ -51,14 +53,26 @@ impl StreamPlayer for StreamPlayerImpl {
             .with_max_sample_rate();
         let default_sample_rate = config.sample_rate();
 
-
-        Self {
+         Self {
             channels,
             default_sample_rate,
             stop_channel_sender: None,
             producer: None,
             config,
         }
+
+    }
+}
+
+
+
+impl Sink for StreamPlayerImpl {
+    fn push(&mut self, data: &[f32]) {
+        if self.producer.is_none() {
+            return;
+        }
+
+        push_with_backpressure(self.producer.as_mut().unwrap(), data);
     }
 
     fn stop(&mut self) {
@@ -102,13 +116,5 @@ impl StreamPlayer for StreamPlayerImpl {
             let _stream = stream;
             let _ = stop_rx.recv();
         });
-    }
-
-    fn push_samples(&mut self, samples: &[f32]) {
-        if self.producer.is_none() {
-            return;
-        }
-
-        push_with_backpressure(self.producer.as_mut().unwrap(), samples);
     }
 }
