@@ -1,20 +1,19 @@
 use crate::streamer::{Sink, StreamErr, Streamer};
 use audioadapter_buffers::direct::InterleavedSlice;
+use cpal::default_host;
 use cpal::traits::{DeviceTrait, HostTrait};
-use cpal::{SampleRate, default_host};
 use rubato::{Fft, FixedSync, Resampler};
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions};
 use symphonia::core::errors::Error;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
+use symphonia::core::probe::{Hint, ProbeResult};
 
 const CHUNK_SIZE: usize = 1024;
 
 struct SingleStreamer {
-    media_source: Option<Box<dyn MediaSource>>,
     mime_type: String,
     paused: bool,
     resampler: Option<Fft<f32>>,
@@ -22,20 +21,77 @@ struct SingleStreamer {
     resampling_buffer: Vec<f32>,
     sink: Option<Box<dyn Sink>>,
     default_sample_rate: u32,
+    input_sample_rate: u32,
+    probe_result: ProbeResult,
+    channels_size: u16,
+    track_id: u32,
+    codec_params: CodecParameters,
 }
 
 impl SingleStreamer {
-    pub fn new(source: Box<dyn MediaSource>, mime_type: String) -> Self {
-        Self {
-            media_source: Some(source),
+    pub fn new(source: Box<dyn MediaSource>, mime_type: String) -> Result<Self, StreamErr> {
+        let mss = MediaSourceStream::new(source, Default::default());
+        let mut hint = Hint::new();
+        hint.mime_type(&mime_type);
+        // Use the default options for metadata and format readers.
+        let meta_opts: MetadataOptions = Default::default();
+        let fmt_opts: FormatOptions = Default::default();
+
+        // Probe the media source.
+        let _probed = symphonia::default::get_probe().format(&hint, mss, &fmt_opts, &meta_opts);
+        let Ok(probed) = _probed else {
+            return Err(StreamErr::UnsupportedFormat);
+        };
+
+        // if let Some(metadata_rev) = probed.metadata.get().as_ref().and_then(|m| m.current()) {
+        //     for tag in metadata_rev.tags() {
+        //         println!("[probe] {:?} = {}", tag.std_key, tag.value);
+        //     }
+        // }
+
+        let (track_id, sample_rate, track_channels_size, codec_params) = {
+            let track = probed
+                .format
+                .default_track()
+                .ok_or(StreamErr::NoAudioTrack)?;
+            let id = track.id;
+            let sr = track
+                .codec_params
+                .sample_rate
+                .ok_or(StreamErr::NoSampleRate)?;
+            let ch = track.codec_params.channels.unwrap().count() as u16;
+            let cp = track.codec_params.clone();
+            (id, sr, ch, cp)
+        };
+
+        let host = default_host();
+        let _device = host.default_output_device();
+        let Some(device) = _device else {
+            return Err(StreamErr::NoOutputDevice);
+        };
+
+        let supported = device
+            .supported_output_configs()
+            .expect("error querying output configs")
+            .any(|config| config.channels() == track_channels_size as u16);
+        if !supported {
+            return Err(StreamErr::UnsupportedChannelCount);
+        }
+
+        Ok(Self {
             mime_type,
             paused: false,
             resampler: None,
             checked_need_resampling: false,
             resampling_buffer: Vec::new(),
             sink: None,
-            default_sample_rate: 0
-        }
+            default_sample_rate: 0,
+            input_sample_rate: sample_rate,
+            probe_result: probed,
+            channels_size: track_channels_size,
+            track_id,
+            codec_params,
+        })
     }
     fn resample(
         &mut self,
@@ -107,10 +163,13 @@ impl SingleStreamer {
                             input_channels as usize,
                             CHUNK_SIZE,
                         )
-                            .or_else(|_| Err(StreamErr::ResamplingError))?;
-                        let mut output_adapter =
-                            InterleavedSlice::new_mut(&mut outdata, input_channels as usize, max_out_frames)
-                                .or_else(|_| Err(StreamErr::ResamplingError))?;
+                        .or_else(|_| Err(StreamErr::ResamplingError))?;
+                        let mut output_adapter = InterleavedSlice::new_mut(
+                            &mut outdata,
+                            input_channels as usize,
+                            max_out_frames,
+                        )
+                        .or_else(|_| Err(StreamErr::ResamplingError))?;
                         self.resampler
                             .as_mut()
                             .unwrap()
@@ -131,7 +190,6 @@ impl SingleStreamer {
             }
             Ok(())
         } else {
-
             Ok(())
         }
     }
@@ -142,60 +200,12 @@ impl Streamer for SingleStreamer {
         if self.sink.is_none() {
             return Err(StreamErr::NoSink);
         }
-
-        let mss = MediaSourceStream::new(self.media_source.take().unwrap(), Default::default());
-        let mut hint = Hint::new();
-        hint.mime_type(&self.mime_type);
-        // Use the default options for metadata and format readers.
-        let meta_opts: MetadataOptions = Default::default();
-        let fmt_opts: FormatOptions = Default::default();
-
-        // Probe the media source.
-        let _probed = symphonia::default::get_probe().format(&hint, mss, &fmt_opts, &meta_opts);
-        let Ok(mut probed) = _probed else {
-            return Err(StreamErr::UnsupportedFormat);
-        };
-
-        if let Some(metadata_rev) = probed.metadata.get().as_ref().and_then(|m| m.current()) {
-            for tag in metadata_rev.tags() {
-                println!("[probe] {:?} = {}", tag.std_key, tag.value);
-            }
-        }
-
-        let mut format = probed.format;
         let mut sample_buf = None;
-
-        let _track = format.default_track();
-        let Some(track) = _track else {
-            return Err(StreamErr::NoAudioTrack);
-        };
-        let track_id = track.id;
-
         let dec_opts: DecoderOptions = Default::default();
-
-        let Some(sample_rate) = track.codec_params.sample_rate else {
-            return Err(StreamErr::NoSampleRate);
-        };
-
-        let channels = track.codec_params.channels.unwrap();
-        let track_channels_size = channels.count() as u16;
-
-        let host = default_host();
-        let _device = host.default_output_device();
-        let Some(device) = _device else {
-            return Err(StreamErr::NoOutputDevice);
-        };
-
-        let supported = device
-            .supported_output_configs()
-            .expect("error querying output configs")
-            .any(|config| config.channels() == track_channels_size as u16);
-        if !supported {
-            return Err(StreamErr::UnsupportedChannelCount);
-        }
         let mut decoder = symphonia::default::get_codecs()
-            .make(&track.codec_params, &dec_opts)
-            .expect("unsupported codec");
+            .make(&self.codec_params, &dec_opts)
+            .or_else(|_| Err(StreamErr::UnsupportedCodec))?;
+        let  format = &mut self.probe_result.format;
         loop {
             let packet = match format.next_packet() {
                 Ok(packet) => packet,
@@ -222,7 +232,7 @@ impl Streamer for SingleStreamer {
             }
 
             // If the packet does not belong to the selected track, skip over it.
-            if packet.track_id() != track_id {
+            if packet.track_id() != self.track_id {
                 continue;
             }
 
@@ -237,7 +247,7 @@ impl Streamer for SingleStreamer {
                     if let Some(buf) = &mut sample_buf {
                         buf.copy_interleaved_ref(_decoded);
                         let b = buf.samples();
-                        self.resample(sample_rate, track_channels_size, b)?;
+                        self.resample(self.input_sample_rate, self.channels_size, b)?;
                     }
                 }
                 Err(Error::IoError(_)) => {
