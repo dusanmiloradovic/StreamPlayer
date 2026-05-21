@@ -1,12 +1,12 @@
 use crate::streamer::{Sink, StreamErr, Streamer};
 use audioadapter_buffers::direct::InterleavedSlice;
-use cpal::{default_host, SampleRate};
 use cpal::traits::{DeviceTrait, HostTrait};
+use cpal::default_host;
 use rubato::{Fft, FixedSync, Resampler};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CodecParameters, DecoderOptions};
 use symphonia::core::errors::Error;
-use symphonia::core::formats::{FormatOptions};
+use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::{Hint, ProbeResult};
@@ -37,13 +37,12 @@ fn resample(
     input_channels: u16,
     samples: &[f32],
 ) -> Result<(), StreamErr> {
-
     if let Some(r) = resampler {
+        let max_out_frames = r.output_frames_max();
+        let mut outdata = vec![0.0f32; max_out_frames * input_channels as usize];
         resampling_buffer.extend_from_slice(samples);
         let samples_per_chunk = CHUNK_SIZE * input_channels as usize;
         while !resampling_buffer.is_empty() {
-            let max_out_frames = r.output_frames_max();
-            let mut outdata = vec![0.0f32; max_out_frames * input_channels as usize];
             if resampling_buffer.len() >= samples_per_chunk {
                 let actual_out_frames = {
                     let chunk = &resampling_buffer[..samples_per_chunk];
@@ -55,7 +54,7 @@ fn resample(
                         input_channels as usize,
                         max_out_frames,
                     )
-                    .expect("failed to create output adapter");
+                    .or_else(|_| Err(StreamErr::ResamplingError))?;
                     r.process_into_buffer(&input_adapter, &mut output_adapter, None)
                         .or_else(|_| Err(StreamErr::ResamplingError))?
                         .1
@@ -153,8 +152,10 @@ impl SingleStreamer {
             .find(|c| c.channels() == track_channels_size)
             .ok_or_else(|| StreamErr::NoDeviceConfigForChannelCount)?;
 
-        let closest = sample_rate
-            .clamp(config_range.min_sample_rate(), config_range.max_sample_rate());
+        let closest = sample_rate.clamp(
+            config_range.min_sample_rate(),
+            config_range.max_sample_rate(),
+        );
         let config = config_range.with_sample_rate(closest);
         let config_sample_rate = config.sample_rate();
         let resampler = if config_sample_rate != sample_rate {
@@ -165,7 +166,8 @@ impl SingleStreamer {
                 2,
                 track_channels_size as usize,
                 FixedSync::Input,
-            ).ok()
+            )
+            .ok()
         } else {
             None
         };
