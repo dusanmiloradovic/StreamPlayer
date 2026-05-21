@@ -29,67 +29,38 @@ pub struct SingleStreamer {
 
 // had to move out of the struct because of borrow checker(if this was a method, self would be borrowed)
 fn resample(
-    default_sample_rate: &mut u32,
     resampler: &mut Option<Fft<f32>>,
     resampling_buffer: &mut Vec<f32>,
     sink: &mut Option<Box<dyn Sink>>,
-    input_sample_rate: u32,
     input_channels: u16,
     samples: &[f32],
 ) -> Result<(), StreamErr> {
     if let Some(r) = resampler {
-        let max_out_frames = r.output_frames_max();
-        let mut outdata = vec![0.0f32; max_out_frames * input_channels as usize];
         resampling_buffer.extend_from_slice(samples);
         let samples_per_chunk = CHUNK_SIZE * input_channels as usize;
-        while !resampling_buffer.is_empty() {
-            if resampling_buffer.len() >= samples_per_chunk {
-                let actual_out_frames = {
-                    let chunk = &resampling_buffer[..samples_per_chunk];
-                    let input_adapter =
-                        InterleavedSlice::new(chunk, input_channels as usize, CHUNK_SIZE)
-                            .or_else(|_| Err(StreamErr::ResamplingError))?;
-                    let mut output_adapter = InterleavedSlice::new_mut(
-                        &mut outdata,
-                        input_channels as usize,
-                        max_out_frames,
-                    )
-                    .or_else(|_| Err(StreamErr::ResamplingError))?;
-                    r.process_into_buffer(&input_adapter, &mut output_adapter, None)
-                        .or_else(|_| Err(StreamErr::ResamplingError))?
-                        .1
-                };
-                let resampled = &outdata[..actual_out_frames * input_channels as usize];
-                sink.as_mut().ok_or(StreamErr::NoSink)?.push(resampled);
-                resampling_buffer.drain(..samples_per_chunk);
-            } else {
-                let remaining = resampling_buffer.len();
-                resampling_buffer.resize(samples_per_chunk, 0.0);
-                let actual_out_frames = {
-                    let input_adapter = InterleavedSlice::new(
-                        resampling_buffer,
-                        input_channels as usize,
-                        CHUNK_SIZE,
-                    )
-                    .or_else(|_| Err(StreamErr::ResamplingError))?;
-                    let mut output_adapter = InterleavedSlice::new_mut(
-                        &mut outdata,
-                        input_channels as usize,
-                        max_out_frames,
-                    )
-                    .or_else(|_| Err(StreamErr::ResamplingError))?;
-                    r.process_into_buffer(&input_adapter, &mut output_adapter, None)
-                        .or_else(|_| Err(StreamErr::ResamplingError))?
-                        .1
-                };
-                let ratio = *default_sample_rate as f64 / input_sample_rate as f64;
-                let remaining_frames = remaining / input_channels as usize;
-                let expected_out_frames = (remaining_frames as f64 * ratio).ceil() as usize;
-                let out_frames = expected_out_frames.min(actual_out_frames);
-                let resampled = &outdata[..out_frames * input_channels as usize];
-                sink.as_mut().ok_or(StreamErr::NoSink)?.push(resampled);
-                resampling_buffer.clear();
-            }
+        // Only process complete chunks; leave any remainder in the buffer for the next call.
+        // Zero-padding a partial chunk mid-stream corrupts the FFT resampler's internal state.
+        let max_out_frames = r.output_frames_max();
+        let mut outdata = vec![0.0f32; max_out_frames * input_channels as usize];
+        while resampling_buffer.len() >= samples_per_chunk {
+            let actual_out_frames = {
+                let chunk = &resampling_buffer[..samples_per_chunk];
+                let input_adapter =
+                    InterleavedSlice::new(chunk, input_channels as usize, CHUNK_SIZE)
+                        .or_else(|_| Err(StreamErr::ResamplingError))?;
+                let mut output_adapter = InterleavedSlice::new_mut(
+                    &mut outdata,
+                    input_channels as usize,
+                    max_out_frames,
+                )
+                .or_else(|_| Err(StreamErr::ResamplingError))?;
+                r.process_into_buffer(&input_adapter, &mut output_adapter, None)
+                    .or_else(|_| Err(StreamErr::ResamplingError))?
+                    .1
+            };
+            let resampled = &outdata[..actual_out_frames * input_channels as usize];
+            sink.as_mut().ok_or(StreamErr::NoSink)?.push(resampled);
+            resampling_buffer.drain(..samples_per_chunk);
         }
         Ok(())
     } else {
@@ -240,11 +211,9 @@ impl Streamer for SingleStreamer {
                     if let Some(buf) = &mut sample_buf {
                         buf.copy_interleaved_ref(_decoded);
                         resample(
-                            &mut self.default_sample_rate,
                             &mut self.resampler,
                             &mut self.resampling_buffer,
                             &mut self.sink,
-                            self.input_sample_rate,
                             self.channels_size,
                             buf.samples(),
                         )?;
