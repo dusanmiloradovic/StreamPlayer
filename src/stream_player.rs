@@ -1,9 +1,9 @@
-use audio_learn::streamer::{Sink, Streamer};
+use audio_learn::streamer::{Sink, StreamErr, Streamer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{StreamError, SupportedStreamConfig, default_host};
-use ringbuf::{HeapProd, HeapRb, traits::*};
+use cpal::{default_host, StreamError, SupportedStreamConfig};
+use ringbuf::{traits::*, HeapProd, HeapRb};
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 
 pub trait StreamPlayer {
     fn new(streamer: Box<dyn Streamer>) -> Self;
@@ -22,7 +22,7 @@ pub struct StreamPlayerImpl {
     config: SupportedStreamConfig,
 }
 
-pub fn new_stream_player(streamer: &dyn Streamer) -> StreamPlayerImpl {
+pub fn new_stream_player(streamer: &dyn Streamer) -> Result<StreamPlayerImpl,StreamErr> {
     StreamPlayerImpl::new(streamer)
 }
 
@@ -37,34 +37,38 @@ fn push_with_backpressure(producer: &mut HeapProd<f32>, data: &[f32]) {
     }
 }
 
-impl StreamPlayerImpl{
-    fn new(streamer: &dyn Streamer) -> Self {
+impl StreamPlayerImpl {
+    fn new(streamer: &dyn Streamer) -> Result<Self, StreamErr> {
         let channels = streamer.get_input_channel_count();
+        let track_channels_size = streamer.get_input_channel_count();
+        let input_sample_rate = streamer.get_input_sample_rate();
         let host = default_host();
         let default_device = host.default_output_device().unwrap();
         // let default_config = default_device.default_output_config().unwrap();
         // let default_sample_rate = default_config.sample_rate();
 
-        let config = default_device
+        let config_range = default_device
             .supported_output_configs()
-            .expect("failed to query output configs")
+            .map_err(|_| StreamErr::QueryOutputDeviceError)?
             .find(|c| c.channels() == channels)
-            .expect("no output config found for the requested channel count")
-            .with_max_sample_rate();
+            .ok_or_else(|| StreamErr::NoDeviceConfigForChannelCount)?;
+
+        let closest = input_sample_rate.clamp(
+            config_range.min_sample_rate(),
+            config_range.max_sample_rate(),
+        );
+        let config = config_range.with_sample_rate(closest);
         let default_sample_rate = config.sample_rate();
 
-         Self {
+        Ok(Self {
             channels,
             default_sample_rate,
             stop_channel_sender: None,
             producer: None,
             config,
-        }
-
+        })
     }
 }
-
-
 
 impl Sink for StreamPlayerImpl {
     fn push(&mut self, data: &[f32]) {

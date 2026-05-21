@@ -10,6 +10,10 @@ fn main() {
     let file = File::open("./files/lost_in_the_city.mp3").unwrap();
     let mut streamer = SingleStreamer::new(Box::new(file), "mp3".to_string()).unwrap();
     let mut boxed_streamer = Box::new(streamer);
-    let mut player = stream_player::new_stream_player(boxed_streamer.as_ref());
+    let mut player = stream_player::new_stream_player(boxed_streamer.as_ref()).unwrap();
+    player.start();
+
     boxed_streamer.set_sink(Box::new(player));
+    boxed_streamer.play().unwrap();
+
 }

@@ -1,6 +1,6 @@
 use crate::streamer::{Sink, StreamErr, Streamer};
 use audioadapter_buffers::direct::InterleavedSlice;
-use cpal::default_host;
+use cpal::{default_host, SampleRate};
 use cpal::traits::{DeviceTrait, HostTrait};
 use rubato::{Fft, FixedSync, Resampler};
 use symphonia::core::audio::SampleBuffer;
@@ -94,6 +94,7 @@ fn resample(
         }
         Ok(())
     } else {
+        sink.as_mut().ok_or(StreamErr::NoSink)?.push(samples);
         Ok(())
     }
 }
@@ -140,12 +141,21 @@ impl SingleStreamer {
             return Err(StreamErr::NoOutputDevice);
         };
 
-        let config = device
+        // let config = device
+        //     .supported_output_configs()
+        //     .map_err(|_| StreamErr::QueryOutputDeviceError)?
+        //     .find(|c| c.channels() == track_channels_size)
+        //     .ok_or_else(|| StreamErr::NoDeviceConfigForChannelCount)?
+        //     .with_max_sample_rate();
+        let config_range = device
             .supported_output_configs()
             .map_err(|_| StreamErr::QueryOutputDeviceError)?
             .find(|c| c.channels() == track_channels_size)
-            .ok_or_else(|| StreamErr::NoDeviceConfigForChannelCount)?
-            .with_max_sample_rate();
+            .ok_or_else(|| StreamErr::NoDeviceConfigForChannelCount)?;
+
+        let closest = sample_rate
+            .clamp(config_range.min_sample_rate(), config_range.max_sample_rate());
+        let config = config_range.with_sample_rate(closest);
         let config_sample_rate = config.sample_rate();
         let resampler = if config_sample_rate != sample_rate {
             Fft::<f32>::new(
