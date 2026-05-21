@@ -15,15 +15,15 @@ pub enum StreamErr {
     QueryOutputDeviceError,
     NoDeviceConfigForChannelCount,
     ResamplingError,
+    OutputStreamError,
 }
-pub trait Sink {
-    fn push(&mut self, data: &[f32])-> Result<(), StreamErr>;
-    fn stop(&mut self)-> Result<(), StreamErr>;
-    fn start(&mut self)-> Result<(), StreamErr>;
-
+pub trait Sink: Send {
+    fn push(&mut self, data: &[f32]) -> Result<(), StreamErr>;
+    fn stop(&mut self) -> Result<(), StreamErr>;
+    fn start(&mut self) -> Result<(), StreamErr>;
 }
 
-pub trait Streamer {
+pub trait Streamer: Send {
     fn play(&mut self) -> Result<(), StreamErr>;
     fn pause(&mut self) -> Result<(), StreamErr>;
     fn stop(&self) -> Result<(), StreamErr>;

@@ -59,12 +59,12 @@ fn resample(
                     .1
             };
             let resampled = &outdata[..actual_out_frames * input_channels as usize];
-            sink.as_mut().ok_or(StreamErr::NoSink)?.push(resampled);
+            sink.as_mut().ok_or(StreamErr::NoSink)?.push(resampled)?;
             resampling_buffer.drain(..samples_per_chunk);
         }
         Ok(())
     } else {
-        sink.as_mut().ok_or(StreamErr::NoSink)?.push(samples);
+        sink.as_mut().ok_or(StreamErr::NoSink)?.push(samples)?;
         Ok(())
     }
 }
@@ -177,7 +177,7 @@ impl Streamer for SingleStreamer {
                     return Err(StreamErr::UnknownError);
                 }
                 Err(Error::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    self.sink.as_mut().unwrap().stop();
+                    self.sink.as_mut().unwrap().stop()?;
                     break;
                 }
                 Err(err) => {
