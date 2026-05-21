@@ -1,10 +1,9 @@
-use std::error::Error;
+use std::sync::mpsc::SyncSender;
 
 pub mod single;
 
 #[derive(Debug)]
 pub enum StreamErr {
-    NoSink,
     NoSampleRate,
     UnsupportedFormat,
     NoAudioTrack,
@@ -16,19 +15,14 @@ pub enum StreamErr {
     NoDeviceConfigForChannelCount,
     ResamplingError,
     OutputStreamError,
-}
-pub trait Sink: Send {
-    fn push(&mut self, data: &[f32]) -> Result<(), StreamErr>;
-    fn stop(&mut self) -> Result<(), StreamErr>;
-    fn start(&mut self) -> Result<(), StreamErr>;
+    SendError,
 }
 
 pub trait Streamer: Send {
-    fn play(&mut self) -> Result<(), StreamErr>;
+    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> Result<(), StreamErr>;
     fn pause(&mut self) -> Result<(), StreamErr>;
     fn stop(&self) -> Result<(), StreamErr>;
     fn seek(&self, time: u64) -> Result<(), StreamErr>;
-    fn set_sink(&mut self, sink: Box<dyn Sink>);
     fn get_input_sample_rate(&self) -> u32;
     fn get_input_channel_count(&self) -> u16;
 }

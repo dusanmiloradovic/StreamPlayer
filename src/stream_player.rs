@@ -1,57 +1,44 @@
-use audio_learn::streamer::{Sink, StreamErr, Streamer};
+use audio_learn::streamer::{StreamErr, Streamer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{default_host, StreamError, SupportedStreamConfig};
-use ringbuf::{traits::*, HeapProd, HeapRb};
-use std::sync::atomic::AtomicUsize;
-use std::sync::{mpsc, Arc};
-
-pub trait StreamPlayer {
-    fn new(streamer: Box<dyn Streamer>) -> Self;
-    fn stop(&mut self);
-    fn start(&mut self) -> Result<(), StreamErr>;
-    fn push_samples(&mut self, sample: &[f32]);
-}
-
-const CHUNK_SIZE: usize = 1024;
+use ringbuf::{traits::*, HeapRb};
+use std::sync::mpsc;
+use std::thread;
 
 pub struct StreamPlayerImpl {
     default_sample_rate: u32,
     channels: u16,
-    stop_channel_sender: Option<mpsc::Sender<()>>,
-    producer: Option<HeapProd<f32>>,
     config: SupportedStreamConfig,
+    streamer: Option<Box<dyn Streamer + Send>>,
 }
 
-pub fn new_stream_player(streamer: &dyn Streamer) -> Result<StreamPlayerImpl,StreamErr> {
+pub fn new_stream_player(streamer: Box<dyn Streamer + Send>) -> Result<StreamPlayerImpl, StreamErr> {
     StreamPlayerImpl::new(streamer)
 }
 
-fn push_with_backpressure(producer: &mut HeapProd<f32>, data: &[f32]) {
+fn push_with_backpressure(producer: &mut ringbuf::HeapProd<f32>, data: &[f32]) {
     let mut offset = 0;
     while offset < data.len() {
         let pushed = producer.push_slice(&data[offset..]);
         offset += pushed;
         if offset < data.len() {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 }
 
 impl StreamPlayerImpl {
-    fn new(streamer: &dyn Streamer) -> Result<Self, StreamErr> {
+    fn new(streamer: Box<dyn Streamer + Send>) -> Result<Self, StreamErr> {
         let channels = streamer.get_input_channel_count();
-        let track_channels_size = streamer.get_input_channel_count();
         let input_sample_rate = streamer.get_input_sample_rate();
         let host = default_host();
-        let default_device = host.default_output_device().unwrap();
-        // let default_config = default_device.default_output_config().unwrap();
-        // let default_sample_rate = default_config.sample_rate();
+        let device = host.default_output_device().ok_or(StreamErr::NoOutputDevice)?;
 
-        let config_range = default_device
+        let config_range = device
             .supported_output_configs()
             .map_err(|_| StreamErr::QueryOutputDeviceError)?
             .find(|c| c.channels() == channels)
-            .ok_or_else(|| StreamErr::NoDeviceConfigForChannelCount)?;
+            .ok_or(StreamErr::NoDeviceConfigForChannelCount)?;
 
         let closest = input_sample_rate.clamp(
             config_range.min_sample_rate(),
@@ -63,65 +50,62 @@ impl StreamPlayerImpl {
         Ok(Self {
             channels,
             default_sample_rate,
-            stop_channel_sender: None,
-            producer: None,
             config,
+            streamer: Some(streamer),
         })
     }
-}
 
-impl Sink for StreamPlayerImpl {
-    fn push(&mut self, data: &[f32]) -> Result<(), StreamErr>{
-        if self.producer.is_none() {
-            return Ok(());
-        }
+    pub fn start(&mut self) -> Result<thread::JoinHandle<()>, StreamErr> {
+        let (sender, receiver) = mpsc::sync_channel::<Vec<f32>>(8);
 
-        push_with_backpressure(self.producer.as_mut().unwrap(), data);
-        Ok(())
-    }
-
-    fn stop(&mut self) -> Result<(), StreamErr>{
-        if let Some(sender) = self.stop_channel_sender.take() {
-            let _ = sender.send(());
-        }
-        Ok(())
-    }
-
-    fn start(&mut self) -> Result<(), StreamErr>{
         let target_latency_secs = 1f32;
         let raw_size =
             (self.default_sample_rate as f32 * self.channels as f32 * target_latency_secs) as usize;
         let ring_size = raw_size.next_power_of_two();
-        let (producer, mut consumer) = HeapRb::<f32>::new(ring_size).split();
-        self.producer = Some(producer);
-        let sample_counter = Arc::new(AtomicUsize::new(0));
-        let counter_clone = Arc::clone(&sample_counter);
-        // TODO sample counter to struct, so it can be shared
-        // that is where the playing time will be calculated
+        let sample_rate = self.default_sample_rate;
+        let (mut producer, mut consumer) = HeapRb::<f32>::new(ring_size).split();
+
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+
+        // Drains the channel into the ring buffer; after the channel closes, waits
+        // for the ring buffer to drain before signalling the cpal keepalive thread.
+        thread::spawn(move || {
+            while let Ok(samples) = receiver.recv() {
+                push_with_backpressure(&mut producer, &samples);
+            }
+            let drain_time = std::time::Duration::from_secs_f32(ring_size as f32 / sample_rate as f32);
+            thread::sleep(drain_time);
+            let _ = stop_tx.send(());
+        });
 
         let data_callback = move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
             for sample in out.iter_mut() {
                 *sample = consumer.try_pop().unwrap_or(0.0);
-                counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         };
-        let err_fn = |err: StreamError| eprintln!("an error occurred on stream: {err}");
-        let host = default_host();
-        let device = host
-            .default_output_device().ok_or_else(|| StreamErr::NoDeviceConfigForChannelCount)?;
-
-
+        let err_fn = |err: StreamError| eprintln!("stream error: {err}");
+        let device = default_host()
+            .default_output_device()
+            .ok_or(StreamErr::NoOutputDevice)?;
         let stream = device
             .build_output_stream(&self.config.config(), data_callback, err_fn, None)
-            .expect("failed to build stream");
-        stream.play().expect("failed to start stream");
+            .map_err(|_| StreamErr::OutputStreamError)?;
+        stream.play().map_err(|_| StreamErr::OutputStreamError)?;
 
-        let (stop_tx, stop_rx) = mpsc::channel::<()>();
-        self.stop_channel_sender = Some(stop_tx);
-        std::thread::spawn(move || {
+        // Holds the cpal stream alive until the ring buffer has drained.
+        thread::spawn(move || {
             let _stream = stream;
             let _ = stop_rx.recv();
         });
-        Ok(())
+
+        let mut streamer = self.streamer.take().expect("start() called twice");
+        let handle = thread::spawn(move || {
+            if let Err(e) = streamer.play(sender) {
+                eprintln!("playback error: {e:?}");
+            }
+            // sender dropped here → channel closes → consumer thread exits after drain
+        });
+
+        Ok(handle)
     }
 }
