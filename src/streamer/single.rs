@@ -160,7 +160,7 @@ impl SingleStreamer {
 }
 
 impl Streamer for SingleStreamer {
-    fn play(mut self) -> Result<(), StreamErr> {
+    fn play(&mut self) -> Result<(), StreamErr> {
         if self.sink.is_none() {
             return Err(StreamErr::NoSink);
         }
@@ -240,11 +240,11 @@ impl Streamer for SingleStreamer {
         Ok(())
     }
 
-    fn stop(self) -> Result<(), StreamErr> {
+    fn stop(&self) -> Result<(), StreamErr> {
         todo!()
     }
 
-    fn seek(self, time: u64) -> Result<(), StreamErr> {
+    fn seek(&self, time: u64) -> Result<(), StreamErr> {
         todo!()
     }
 

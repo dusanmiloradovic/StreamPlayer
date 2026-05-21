@@ -8,7 +8,7 @@ use std::sync::{mpsc, Arc};
 pub trait StreamPlayer {
     fn new(streamer: Box<dyn Streamer>) -> Self;
     fn stop(&mut self);
-    fn start(&mut self);
+    fn start(&mut self) -> Result<(), StreamErr>;
     fn push_samples(&mut self, sample: &[f32]);
 }
 
@@ -71,21 +71,23 @@ impl StreamPlayerImpl {
 }
 
 impl Sink for StreamPlayerImpl {
-    fn push(&mut self, data: &[f32]) {
+    fn push(&mut self, data: &[f32]) -> Result<(), StreamErr>{
         if self.producer.is_none() {
-            return;
+            return Ok(());
         }
 
         push_with_backpressure(self.producer.as_mut().unwrap(), data);
+        Ok(())
     }
 
-    fn stop(&mut self) {
+    fn stop(&mut self) -> Result<(), StreamErr>{
         if let Some(sender) = self.stop_channel_sender.take() {
             let _ = sender.send(());
         }
+        Ok(())
     }
 
-    fn start(&mut self) {
+    fn start(&mut self) -> Result<(), StreamErr>{
         let target_latency_secs = 1f32;
         let raw_size =
             (self.default_sample_rate as f32 * self.channels as f32 * target_latency_secs) as usize;
@@ -106,8 +108,8 @@ impl Sink for StreamPlayerImpl {
         let err_fn = |err: StreamError| eprintln!("an error occurred on stream: {err}");
         let host = default_host();
         let device = host
-            .default_output_device()
-            .expect("no output device found");
+            .default_output_device().ok_or_else(|| StreamErr::NoDeviceConfigForChannelCount)?;
+
 
         let stream = device
             .build_output_stream(&self.config.config(), data_callback, err_fn, None)
@@ -120,5 +122,6 @@ impl Sink for StreamPlayerImpl {
             let _stream = stream;
             let _ = stop_rx.recv();
         });
+        Ok(())
     }
 }
