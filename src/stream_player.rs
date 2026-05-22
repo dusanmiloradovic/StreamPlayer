@@ -2,7 +2,8 @@ use audio_learn::streamer::{StreamErr, Streamer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{default_host, StreamError, SupportedStreamConfig};
 use ringbuf::{traits::*, HeapRb};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::{mpsc, Arc};
 use std::thread;
 
 pub struct StreamPlayerImpl {
@@ -10,6 +11,9 @@ pub struct StreamPlayerImpl {
     channels: u16,
     config: SupportedStreamConfig,
     streamer: Option<Box<dyn Streamer + Send>>,
+    paused: Arc<AtomicBool>,
+    command_sender: Option<mpsc::Sender<StreamCommand>>,
+    elapsed_samples: Arc<AtomicU64>,
 }
 
 pub fn new_stream_player(streamer: Box<dyn Streamer + Send>) -> Result<StreamPlayerImpl, StreamErr> {
@@ -25,6 +29,13 @@ fn push_with_backpressure(producer: &mut ringbuf::HeapProd<f32>, data: &[f32]) {
             thread::sleep(std::time::Duration::from_millis(5));
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StreamCommand {
+    Pause,
+    Resume,
+    Stop,
 }
 
 impl StreamPlayerImpl {
@@ -52,6 +63,9 @@ impl StreamPlayerImpl {
             default_sample_rate,
             config,
             streamer: Some(streamer),
+            paused: Arc::new(AtomicBool::new(false)),
+            command_sender: None,
+            elapsed_samples: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -65,18 +79,30 @@ impl StreamPlayerImpl {
         let sample_rate = self.default_sample_rate;
         let (mut producer, mut consumer) = HeapRb::<f32>::new(ring_size).split();
 
-        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+
+        let (command_tx, command_rx) = mpsc::channel::<StreamCommand>();
+
+        self.command_sender = Some(command_tx);
 
         // Drains the channel into the ring buffer; after the channel closes, waits
         // for the ring buffer to drain before signalling the cpal keepalive thread.
+        let cmd_sender = self.command_sender.as_ref().unwrap().clone();
+        let paused = self.paused.clone();
+        let counter = self.elapsed_samples.clone();
         thread::spawn(move || {
+            while paused.load(std::sync::atomic::Ordering::Relaxed) {
+                thread::sleep(std::time::Duration::from_millis(10));
+                // on some platforms, stream.pause() is not working (that is a hardware limitation)
+            }
             while let Ok(samples) = receiver.recv() {
+                counter.fetch_add(samples.len() as u64, std::sync::atomic::Ordering::Relaxed);
                 push_with_backpressure(&mut producer, &samples);
             }
             let drain_time = std::time::Duration::from_secs_f32(ring_size as f32 / sample_rate as f32);
             thread::sleep(drain_time);
-            let _ = stop_tx.send(());
+            cmd_sender.send(StreamCommand::Stop).unwrap();
         });
+
 
         let data_callback = move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
             for sample in out.iter_mut() {
@@ -92,11 +118,25 @@ impl StreamPlayerImpl {
             .map_err(|_| StreamErr::OutputStreamError)?;
         stream.play().map_err(|_| StreamErr::OutputStreamError)?;
 
-        // Holds the cpal stream alive until the ring buffer has drained.
+        let paused = self.paused.clone();
         thread::spawn(move || {
             let _stream = stream;
-            let _ = stop_rx.recv();
+            //holds the stream alive until the stop command is received
+            while let Ok(command) = command_rx.recv() {
+                if command == StreamCommand::Pause {
+                    _stream.pause().unwrap_or_else(|_| eprintln!("pause failed"));
+                    paused.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                if command == StreamCommand::Resume {
+                    _stream.play().unwrap_or_else(|_| eprintln!("resume failed"));
+                    paused.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+                if command == StreamCommand::Stop {
+                    break;
+                }
+            }
         });
+
 
         let mut streamer = self.streamer.take().expect("start() called twice");
         let handle = thread::spawn(move || {
@@ -107,5 +147,30 @@ impl StreamPlayerImpl {
         });
 
         Ok(handle)
+    }
+
+    pub fn pause(&mut self) -> Result<(), StreamErr> {
+        let command_sender = self.command_sender.as_ref().unwrap();
+        command_sender.send(StreamCommand::Pause).unwrap();
+        self.streamer.as_mut().unwrap().pause()
+    }
+
+    pub fn resume(&mut self) -> Result<(), StreamErr> {
+        let command_sender = self.command_sender.as_ref().unwrap();
+        command_sender.send(StreamCommand::Resume).unwrap();
+        self.streamer.as_mut().unwrap().resume()
+    }
+
+    pub fn stop(&mut self) -> Result<(), StreamErr> {
+        let command_sender = self.command_sender.as_ref().unwrap();
+        command_sender.send(StreamCommand::Stop).unwrap();
+        self.streamer.take().unwrap().stop()
+    }
+
+
+    pub fn get_play_time_ms(&self) -> f32 {
+        let elapsed_samples = self.elapsed_samples.load(std::sync::atomic::Ordering::Relaxed);
+        let elapsed_ms = elapsed_samples as f32 / self.default_sample_rate as f32 * 1000.0;
+        elapsed_ms
     }
 }

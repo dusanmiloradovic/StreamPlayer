@@ -192,6 +192,11 @@ impl Streamer for SingleStreamer {
         Ok(())
     }
 
+    fn resume(&mut self) -> Result<(), StreamErr> {
+        self.paused = false;
+        Ok(())
+    }
+
     fn stop(&self) -> Result<(), StreamErr> {
         todo!()
     }

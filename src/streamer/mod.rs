@@ -21,6 +21,7 @@ pub enum StreamErr {
 pub trait Streamer: Send {
     fn play(&mut self, sender: SyncSender<Vec<f32>>) -> Result<(), StreamErr>;
     fn pause(&mut self) -> Result<(), StreamErr>;
+    fn resume(&mut self) -> Result<(), StreamErr>;
     fn stop(&self) -> Result<(), StreamErr>;
     fn seek(&self, time: u64) -> Result<(), StreamErr>;
     fn get_input_sample_rate(&self) -> u32;
