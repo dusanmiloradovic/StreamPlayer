@@ -146,7 +146,7 @@ impl Streamer for SingleStreamer {
                 Ok(packet) => packet,
                 Err(Error::ResetRequired) => return Err(StreamErr::UnknownError),
                 Err(Error::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    break; // sender dropped here → channel closes → consumer thread exits
+                    break;
                 }
                 Err(err) => {
                     eprintln!("packet read error: {err:#?}");

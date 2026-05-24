@@ -1,6 +1,7 @@
 use std::sync::mpsc::SyncSender;
 
 pub mod single;
+pub mod mixer;
 
 #[derive(Debug)]
 pub enum StreamErr {
