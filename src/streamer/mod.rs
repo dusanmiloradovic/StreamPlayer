@@ -27,4 +27,5 @@ pub trait Streamer: Send {
     fn seek(&self, time: u64) -> Result<(), StreamErr>;
     fn get_input_sample_rate(&self) -> u32;
     fn get_input_channel_count(&self) -> u16;
+    fn get_output_sample_rate(&self) -> u32; // the output sample rate should match the closest supported sample rate, and the stream should be resampled to this rate.
 }

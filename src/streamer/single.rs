@@ -24,6 +24,7 @@ pub struct SingleStreamer {
     channels_size: u16,
     track_id: u32,
     codec_params: CodecParameters,
+    output_sample_rate: u32,
 }
 
 // Free function to avoid borrow conflict between self.probe_result.format and other fields.
@@ -56,12 +57,16 @@ fn resample(
                     .1
             };
             let resampled = &outdata[..actual_out_frames * input_channels as usize];
-            sender.send(resampled.to_vec()).map_err(|_| StreamErr::SendError)?;
+            sender
+                .send(resampled.to_vec())
+                .map_err(|_| StreamErr::SendError)?;
             resampling_buffer.drain(..samples_per_chunk);
         }
         Ok(())
     } else {
-        sender.send(samples.to_vec()).map_err(|_| StreamErr::SendError)?;
+        sender
+            .send(samples.to_vec())
+            .map_err(|_| StreamErr::SendError)?;
         Ok(())
     }
 }
@@ -84,14 +89,19 @@ impl SingleStreamer {
                 .default_track()
                 .ok_or(StreamErr::NoAudioTrack)?;
             let id = track.id;
-            let sr = track.codec_params.sample_rate.ok_or(StreamErr::NoSampleRate)?;
+            let sr = track
+                .codec_params
+                .sample_rate
+                .ok_or(StreamErr::NoSampleRate)?;
             let ch = track.codec_params.channels.unwrap().count() as u16;
             let cp = track.codec_params.clone();
             (id, sr, ch, cp)
         };
 
         let host = default_host();
-        let device = host.default_output_device().ok_or(StreamErr::NoOutputDevice)?;
+        let device = host
+            .default_output_device()
+            .ok_or(StreamErr::NoOutputDevice)?;
 
         let config_range = device
             .supported_output_configs()
@@ -129,6 +139,7 @@ impl SingleStreamer {
             channels_size: track_channels_size,
             track_id,
             codec_params,
+            output_sample_rate: config_sample_rate,
         })
     }
 }
@@ -211,5 +222,9 @@ impl Streamer for SingleStreamer {
 
     fn get_input_channel_count(&self) -> u16 {
         self.channels_size
+    }
+
+    fn get_output_sample_rate(&self) -> u32 {
+        self.output_sample_rate
     }
 }
