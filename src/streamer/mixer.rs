@@ -13,10 +13,6 @@ use ringbuf::storage::Heap;
 pub struct Mixer {
     streamers: Vec<Box<dyn Streamer>>,
     weights: Vec<f32>,
-    senders: Vec<Option<SyncSender<Vec<f32>>>>,
-    output_sender: Option<SyncSender<Vec<f32>>>,
-    indices: Vec<Arc<AtomicUsize>>,
-    frame_counters: Vec<Arc<AtomicU8>>,
 }
 
 const FRAME_MAX_DELAY: u8 = 10; // wait for all frames to sync up the count. If one or more frames
@@ -24,7 +20,6 @@ const FRAME_MAX_DELAY: u8 = 10; // wait for all frames to sync up the count. If 
 
 impl Mixer {
     pub fn new(streamers: Vec<Box<dyn Streamer>>, weights: Vec<f32>) -> Self {
-        let mut senders = Vec::new();
         if weights.len() != streamers.len() {
             panic!("weights and streamers must have the same length");
         }
@@ -33,17 +28,12 @@ impl Mixer {
             if weights[j] < 0.0 || weights[j] > 1.0 {
                 panic!("weights must be between 0.0 and 1.0");
             }
-            senders.push(None);
         }
 
         // TODO check all output sample rates are the same.
         Self {
             streamers,
             weights,
-            senders,
-            output_sender: None,
-            indices: vec![Arc::new(AtomicUsize::new(0)); len],
-            frame_counters: vec![Arc::new(AtomicU8::new(0)); len],
         }
     }
 }
@@ -116,22 +106,22 @@ impl Streamer for Mixer {
                     max_counter = max_counter.max(counter);
                     min_index = min_index.min(index);
                 }
-                if min_counter == max_counter {
+                if min_counter == max_counter {  //all the threads processed frames
                     let v_size = min_index - prev_index;
                     prev_index = min_index;
                     let mut output_data:Vec<f32> = vec![0.0;channel_count as usize * v_size];
                     let koef = 1.0 / weights.iter().sum::<f32>();
-                    //all the threads processed frames
+
                     for j in 0..streamers_len {
                         let cons = &mut local_ring_consumers[j];
                         let  mut v:Vec<f32> = vec![0.0;channel_count as usize * v_size ];
                         cons.pop_slice(&mut v);
                         output_data.iter_mut().zip(v.iter()).for_each(|(a,b)| *a += b * weights[j] * koef);
                     }
+                    sender.send(output_data).unwrap();
                 } // TODO else if the max diff is larger than FRAME_MAX_DELAY, we need to drop some frames
             }
         });
-       self.output_sender = Some(sender);
         Ok(())
     }
 
