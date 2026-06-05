@@ -22,7 +22,7 @@ pub enum StreamErr {
 }
 
 pub trait Streamer: Send {
-    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> Result<JoinHandle<Result<(), StreamErr>>, StreamErr>;
+    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> JoinHandle<Result<(), StreamErr>>;
     fn pause(&mut self) -> Result<(), StreamErr>;
     fn resume(&mut self) -> Result<(), StreamErr>;
     fn stop(&self) -> Result<(), StreamErr>;

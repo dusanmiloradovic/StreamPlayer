@@ -147,13 +147,12 @@ impl SingleStreamer {
 }
 
 impl Streamer for SingleStreamer {
-    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> Result<JoinHandle<Result<(), StreamErr>>, StreamErr> {
+    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> JoinHandle<Result<(), StreamErr>> {
         let codec_params = self.codec_params.clone();
         let track_id = self.track_id;
         let channels_size = self.channels_size;
-       //
-        let mut format = self.probe_result.take().ok_or(StreamErr::AlreadyPlaying)?.format;
-        let mut resampler = if self.output_sample_rate != self.input_sample_rate {
+        let format = self.probe_result.take().map(|p| p.format);
+        let resampler = if self.output_sample_rate != self.input_sample_rate {
             Fft::<f32>::new(
                 self.input_sample_rate as usize,
                 self.output_sample_rate as usize,
@@ -167,7 +166,9 @@ impl Streamer for SingleStreamer {
             None
         };
 
-        Ok(thread::spawn(move ||->Result<(), StreamErr> {
+        thread::spawn(move || -> Result<(), StreamErr> {
+            let mut format = format.ok_or(StreamErr::AlreadyPlaying)?;
+            let mut resampler = resampler;
             let mut resampling_buffer:Vec<f32> = Vec::new();
             let mut sample_buf = None;
             let dec_opts: DecoderOptions = Default::default();
@@ -217,7 +218,7 @@ impl Streamer for SingleStreamer {
                     Err(_) => return Err(StreamErr::UnknownError),
                 }
             }
-        }))
+        })
     }
 
     fn pause(&mut self) -> Result<(), StreamErr> {

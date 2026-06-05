@@ -45,7 +45,7 @@ struct ChannelData {
 }
 
 impl Streamer for Mixer {
-    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> Result<JoinHandle<Result<(), StreamErr>>, StreamErr> {
+    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> JoinHandle<Result<(), StreamErr>> {
 
         let target_latency_secs = 1usize; // TODO make this constant across the project
         let ring_size = self.get_output_sample_rate() as usize
@@ -74,7 +74,7 @@ impl Streamer for Mixer {
         for j in 0..streamers.len() {
             let streamer = &mut streamers[j];
             let (sender, receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-            streamer.play(sender)?;
+            streamer.play(sender);
             let atomic_index = indices[j].clone();
             let atomic_counter = frame_counters[j].clone();
             let  mut ring_producer = ring_producers.remove(0);
@@ -91,7 +91,7 @@ impl Streamer for Mixer {
             });
         }
 
-        Ok(thread::spawn(move || -> Result<(), StreamErr> {
+        thread::spawn(move || -> Result<(), StreamErr> {
             let mut local_ring_consumers = ring_consumers.drain(..).collect::<Vec<_>>();
             let mut min_counter = streamers_len;
             let mut max_counter = 0;
@@ -123,7 +123,7 @@ impl Streamer for Mixer {
                 } // TODO else if the max diff is larger than FRAME_MAX_DELAY, we need to drop some frames
             }
             Ok(())
-        }))
+        })
     }
 
     fn pause(&mut self) -> Result<(), StreamErr> {
