@@ -1,126 +1,84 @@
 use crate::streamer::{StreamErr, Streamer};
-use ringbuf::{CachingCons, CachingProd, HeapRb, SharedRb};
-use ringbuf::traits::Split;
-use std::sync::atomic::{AtomicU8, AtomicUsize};
-use std::sync::mpsc::Receiver;
+use std::collections::VecDeque;
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
-use ringbuf::producer::Producer;
-use ringbuf::traits::Consumer;
-use ringbuf::storage::Heap;
 
 pub struct Mixer {
     streamers: Vec<Box<dyn Streamer>>,
     weights: Vec<f32>,
 }
 
-const FRAME_MAX_DELAY: u8 = 10; // wait for all frames to sync up the count. If one or more frames
-//fail to load any data during this period, the mixer will mix up with empty values
-
 impl Mixer {
     pub fn new(streamers: Vec<Box<dyn Streamer>>, weights: Vec<f32>) -> Self {
         if weights.len() != streamers.len() {
             panic!("weights and streamers must have the same length");
         }
-        let len = streamers.len();
-        for j in 0..len {
-            if weights[j] < 0.0 || weights[j] > 1.0 {
-                panic!("weights must be between 0.0 and 1.0");
+        for &w in &weights {
+            if w < 0.0 {
+                panic!("weights must be positive");
             }
         }
-
         // TODO check all output sample rates are the same.
-        Self {
-            streamers,
-            weights,
-        }
+        Self { streamers, weights }
     }
-}
-
-struct ChannelData {
-    index: usize,
-    data: Vec<f32>,
 }
 
 impl Streamer for Mixer {
     fn play(&mut self, sender: SyncSender<Vec<f32>>) -> JoinHandle<Result<(), StreamErr>> {
-
-        let target_latency_secs = 1usize; // TODO make this constant across the project
-        let ring_size = self.get_output_sample_rate() as usize
-            * self.get_input_channel_count() as usize
-            * target_latency_secs;
-        let channel_count = self.get_input_channel_count();
         let weights = self.weights.clone();
         let streamers = &mut self.streamers;
         let streamers_len = streamers.len();
 
+        let indices: Vec<Arc<AtomicUsize>> = (0..streamers_len)
+            .map(|_| Arc::new(AtomicUsize::new(0)))
+            .collect();
+        let shared_bufs: Vec<Arc<Mutex<VecDeque<f32>>>> = (0..streamers_len)
+            .map(|_| Arc::new(Mutex::new(VecDeque::new())))
+            .collect();
 
-        let indices = vec![Arc::new(AtomicUsize::new(0)); streamers_len];
-        let frame_counters = vec![Arc::new(AtomicUsize::new(0)); streamers_len];
-        let mut ring_producers:Vec<CachingProd<Arc<SharedRb<Heap<f32>>>>>= Vec::new();
-        let mut ring_consumers:Vec<CachingCons<Arc<SharedRb<Heap<f32>>>>> = Vec::new();
-        for _ in 0..streamers.len() {
-            let (producer, consumer) = HeapRb::<f32>::new(ring_size).split();
-            ring_producers.push(producer);
-            ring_consumers.push(consumer);
-        }
-
-        let (sync_sender, sync_receiver) = mpsc::sync_channel::<usize>(8); // signals which stream data was sent
-
-
+        let (sync_sender, sync_receiver) = mpsc::sync_channel::<usize>(8);
 
         for j in 0..streamers.len() {
             let streamer = &mut streamers[j];
-            let (sender, receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-            streamer.play(sender);
+            let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
+            streamer.play(inner_sender);
             let atomic_index = indices[j].clone();
-            let atomic_counter = frame_counters[j].clone();
-            let  mut ring_producer = ring_producers.remove(0);
+            let shared_buf = shared_bufs[j].clone();
             let ssender = sync_sender.clone();
-            thread::spawn( move || {
-                while let Ok(samples) = receiver.recv() {
-
-                    atomic_counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                    atomic_index
-                        .fetch_add(samples.len(), std::sync::atomic::Ordering::AcqRel);
-                    ring_producer.push_slice(&samples);
+            thread::spawn(move || {
+                while let Ok(samples) = inner_receiver.recv() {
+                    shared_buf.lock().unwrap().extend(samples.iter().copied());
+                    atomic_index.fetch_add(samples.len(), std::sync::atomic::Ordering::AcqRel);
                     ssender.send(j).unwrap();
                 }
             });
         }
 
         thread::spawn(move || -> Result<(), StreamErr> {
-            let mut local_ring_consumers = ring_consumers.drain(..).collect::<Vec<_>>();
-            let mut min_counter = streamers_len;
-            let mut max_counter = 0;
-            let mut min_index = usize::MAX;
-            let mut prev_index = 0; // index is ever-increasing, we need to calculate the diff
-            while let Ok(index) = sync_receiver.recv() {
+            let mut min_index;
+            let mut prev_index = 0usize;
+            while let Ok(_) = sync_receiver.recv() {
+                min_index = usize::MAX;
                 for j in 0..streamers_len {
-                    let atomic_index = indices[j].clone();
-                    let atomic_counter = frame_counters[j].clone();
-                    let index = atomic_index.load(std::sync::atomic::Ordering::Acquire);
-                    let counter = atomic_counter.load(std::sync::atomic::Ordering::Acquire);
-                    min_counter = min_counter.min(counter);
-                    max_counter = max_counter.max(counter);
+                    let index = indices[j].load(std::sync::atomic::Ordering::Acquire);
                     min_index = min_index.min(index);
                 }
-                if min_counter == max_counter {  //all the threads processed frames
-                    let v_size = min_index - prev_index;
+                let v_size = min_index - prev_index;
+                if v_size > 0 {
                     prev_index = min_index;
-                    let mut output_data:Vec<f32> = vec![0.0;channel_count as usize * v_size];
                     let koef = 1.0 / weights.iter().sum::<f32>();
-
+                    let mut output_data = vec![0.0f32; v_size];
                     for j in 0..streamers_len {
-                        let cons = &mut local_ring_consumers[j];
-                        let  mut v:Vec<f32> = vec![0.0;channel_count as usize * v_size ];
-                        cons.pop_slice(&mut v);
-                        output_data.iter_mut().zip(v.iter()).for_each(|(a,b)| *a += b * weights[j] * koef);
+                        let mut buf = shared_bufs[j].lock().unwrap();
+                        for (out, s) in output_data.iter_mut().zip(buf.drain(..v_size)) {
+                            *out += s * weights[j] * koef;
+                        }
                     }
-                    sender.send(output_data).unwrap();
-                } // TODO else if the max diff is larger than FRAME_MAX_DELAY, we need to drop some frames
+                    sender.send(output_data).map_err(|_| StreamErr::SendError)?;
+                }
             }
             Ok(())
         })
@@ -138,7 +96,7 @@ impl Streamer for Mixer {
         todo!()
     }
 
-    fn seek(&self, time: u64) -> Result<(), StreamErr> {
+    fn seek(&self, _time: u64) -> Result<(), StreamErr> {
         todo!()
     }
 
@@ -151,6 +109,6 @@ impl Streamer for Mixer {
     }
 
     fn get_output_sample_rate(&self) -> u32 {
-        self.streamers[0].get_output_sample_rate() //all guaranteed to have the same sample rate
+        self.streamers[0].get_output_sample_rate()
     }
 }
