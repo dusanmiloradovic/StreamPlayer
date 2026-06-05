@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use crate::streamer::{StreamErr, Streamer};
 use audioadapter_buffers::direct::InterleavedSlice;
 use cpal::default_host;
@@ -27,6 +29,7 @@ pub struct SingleStreamer {
     track_id: u32,
     codec_params: CodecParameters,
     output_sample_rate: u32,
+    finished: Arc<AtomicBool>,
 }
 
 // Free function to avoid borrow conflict between self.probe_result.format and other fields.
@@ -142,6 +145,7 @@ impl SingleStreamer {
             track_id,
             codec_params,
             output_sample_rate: config_sample_rate,
+            finished: Arc::new(AtomicBool::new(false)),
         })
     }
 }
@@ -166,6 +170,7 @@ impl Streamer for SingleStreamer {
             None
         };
 
+        let finished = self.finished.clone();
         thread::spawn(move || -> Result<(), StreamErr> {
             let mut format = format.ok_or(StreamErr::AlreadyPlaying)?;
             let mut resampler = resampler;
@@ -178,12 +183,17 @@ impl Streamer for SingleStreamer {
             loop {
                 let packet = match format.next_packet() {
                     Ok(packet) => packet,
-                    Err(Error::ResetRequired) => return Err(StreamErr::UnknownError),
-                    Err(Error::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    Err(Error::ResetRequired) => {
+                        finished.store(true, std::sync::atomic::Ordering::Relaxed);
                         return Err(StreamErr::UnknownError);
+                    }
+                    Err(Error::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        finished.store(true, std::sync::atomic::Ordering::Relaxed);
+                        return Ok(());
                     }
                     Err(err) => {
                         eprintln!("packet read error: {err:#?}");
+                        finished.store(true, std::sync::atomic::Ordering::Relaxed);
                         return Err(StreamErr::UnknownError);
                     }
                 };
@@ -249,5 +259,9 @@ impl Streamer for SingleStreamer {
 
     fn get_output_sample_rate(&self) -> u32 {
         self.output_sample_rate
+    }
+
+    fn finished_flag(&self) -> Arc<AtomicBool> {
+        self.finished.clone()
     }
 }

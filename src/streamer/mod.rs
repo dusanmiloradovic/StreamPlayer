@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::SyncSender;
 use std::thread::JoinHandle;
 
@@ -30,4 +32,5 @@ pub trait Streamer: Send {
     fn get_input_sample_rate(&self) -> u32;
     fn get_input_channel_count(&self) -> u16;
     fn get_output_sample_rate(&self) -> u32; // the output sample rate should match the closest supported sample rate, and the stream should be resampled to this rate.
+    fn finished_flag(&self) -> Arc<AtomicBool>;
 }

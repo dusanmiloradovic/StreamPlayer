@@ -1,6 +1,6 @@
 use crate::streamer::{StreamErr, Streamer};
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -9,6 +9,7 @@ use std::thread::JoinHandle;
 pub struct Mixer {
     streamers: Vec<Box<dyn Streamer>>,
     weights: Vec<f32>,
+    finished: Arc<AtomicBool>,
 }
 
 impl Mixer {
@@ -22,7 +23,7 @@ impl Mixer {
             }
         }
         // TODO check all output sample rates are the same.
-        Self { streamers, weights }
+        Self { streamers, weights, finished: Arc::new(AtomicBool::new(false)) }
     }
 }
 
@@ -39,6 +40,10 @@ impl Streamer for Mixer {
             .map(|_| Arc::new(Mutex::new(VecDeque::new())))
             .collect();
 
+        let finished_flags: Vec<Arc<AtomicBool>> = streamers.iter()
+            .map(|s| s.finished_flag())
+            .collect();
+
         let (sync_sender, sync_receiver) = mpsc::sync_channel::<usize>(8);
 
         for j in 0..streamers.len() {
@@ -48,8 +53,9 @@ impl Streamer for Mixer {
             let atomic_index = indices[j].clone();
             let shared_buf = shared_bufs[j].clone();
             let ssender = sync_sender.clone();
+            let finished_flag = finished_flags[j].clone();
             thread::spawn(move || {
-                while let Ok(samples) = inner_receiver.recv() {
+                while let Ok(samples) = inner_receiver.recv() && !finished_flag.load(std::sync::atomic::Ordering::Acquire){
                     shared_buf.lock().unwrap().extend(samples.iter().copied());
                     atomic_index.fetch_add(samples.len(), std::sync::atomic::Ordering::AcqRel);
                     ssender.send(j).unwrap();
@@ -57,14 +63,22 @@ impl Streamer for Mixer {
             });
         }
 
+        let finished = self.finished.clone();
         thread::spawn(move || -> Result<(), StreamErr> {
             let mut min_index;
             let mut prev_index = 0usize;
             while let Ok(_) = sync_receiver.recv() {
                 min_index = usize::MAX;
                 for j in 0..streamers_len {
+                    if finished_flags[j].load(std::sync::atomic::Ordering::Acquire) {
+                        continue;
+                    }
                     let index = indices[j].load(std::sync::atomic::Ordering::Acquire);
                     min_index = min_index.min(index);
+                }
+                if min_index == usize::MAX {
+                    // All streamers finished
+                    break;
                 }
                 let v_size = min_index - prev_index;
                 if v_size > 0 {
@@ -73,13 +87,18 @@ impl Streamer for Mixer {
                     let mut output_data = vec![0.0f32; v_size];
                     for j in 0..streamers_len {
                         let mut buf = shared_bufs[j].lock().unwrap();
-                        for (out, s) in output_data.iter_mut().zip(buf.drain(..v_size)) {
+                        let available = buf.len().min(v_size);
+                        if available == 0 {
+                            continue;
+                        }
+                        for (out, s) in output_data.iter_mut().zip(buf.drain(..available)) {
                             *out += s * weights[j] * koef;
                         }
                     }
                     sender.send(output_data).map_err(|_| StreamErr::SendError)?;
                 }
             }
+            finished.store(true, std::sync::atomic::Ordering::Release);
             Ok(())
         })
     }
@@ -110,5 +129,9 @@ impl Streamer for Mixer {
 
     fn get_output_sample_rate(&self) -> u32 {
         self.streamers[0].get_output_sample_rate()
+    }
+
+    fn finished_flag(&self) -> Arc<AtomicBool> {
+        self.finished.clone()
     }
 }
