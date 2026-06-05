@@ -140,8 +140,9 @@ impl StreamPlayerImpl {
 
         let mut streamer = self.streamer.take().expect("start() called twice");
         let handle = thread::spawn(move || {
-            if let Err(e) = streamer.play(sender) {
-                eprintln!("playback error: {e:?}");
+            match streamer.play(sender) {
+                Ok(join) => { let _ = join.join(); }
+                Err(e) => eprintln!("playback error: {e:?}"),
             }
             // sender dropped here → channel closes → consumer thread exits after drain
         });

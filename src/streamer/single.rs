@@ -22,7 +22,7 @@ pub struct SingleStreamer {
     resampler: Option<Fft<f32>>,
     resampling_buffer: Vec<f32>,
     input_sample_rate: u32,
-    probe_result: ProbeResult,
+    probe_result: Option<ProbeResult>,
     channels_size: u16,
     track_id: u32,
     codec_params: CodecParameters,
@@ -137,7 +137,7 @@ impl SingleStreamer {
             resampler,
             resampling_buffer: Vec::new(),
             input_sample_rate: sample_rate,
-            probe_result: probed,
+            probe_result: Some(probed),
             channels_size: track_channels_size,
             track_id,
             codec_params,
@@ -147,12 +147,12 @@ impl SingleStreamer {
 }
 
 impl Streamer for SingleStreamer {
-    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> JoinHandle<Result<(), StreamErr>> {
+    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> Result<JoinHandle<Result<(), StreamErr>>, StreamErr> {
         let codec_params = self.codec_params.clone();
         let track_id = self.track_id;
         let channels_size = self.channels_size;
        //
-        let mut format = std::mem::take(&mut self.probe_result.format);
+        let mut format = self.probe_result.take().ok_or(StreamErr::AlreadyPlaying)?.format;
         let mut resampler = if self.output_sample_rate != self.input_sample_rate {
             Fft::<f32>::new(
                 self.input_sample_rate as usize,
@@ -167,7 +167,7 @@ impl Streamer for SingleStreamer {
             None
         };
 
-        thread::spawn(move ||->Result<(), StreamErr> {
+        Ok(thread::spawn(move ||->Result<(), StreamErr> {
             let mut resampling_buffer:Vec<f32> = Vec::new();
             let mut sample_buf = None;
             let dec_opts: DecoderOptions = Default::default();
@@ -217,10 +217,7 @@ impl Streamer for SingleStreamer {
                     Err(_) => return Err(StreamErr::UnknownError),
                 }
             }
-        })
-
-
-
+        }))
     }
 
     fn pause(&mut self) -> Result<(), StreamErr> {
