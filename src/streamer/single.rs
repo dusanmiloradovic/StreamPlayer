@@ -4,6 +4,8 @@ use cpal::default_host;
 use cpal::traits::{DeviceTrait, HostTrait};
 use rubato::{Fft, FixedSync, Resampler};
 use std::sync::mpsc::SyncSender;
+use std::thread;
+use std::thread::JoinHandle;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CodecParameters, DecoderOptions};
 use symphonia::core::errors::Error;
@@ -145,57 +147,80 @@ impl SingleStreamer {
 }
 
 impl Streamer for SingleStreamer {
-    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> Result<(), StreamErr> {
-        let mut sample_buf = None;
-        let dec_opts: DecoderOptions = Default::default();
-        let mut decoder = symphonia::default::get_codecs()
-            .make(&self.codec_params, &dec_opts)
-            .map_err(|_| StreamErr::UnsupportedCodec)?;
-        let format = self.probe_result.format.as_mut();
-        loop {
-            let packet = match format.next_packet() {
-                Ok(packet) => packet,
-                Err(Error::ResetRequired) => return Err(StreamErr::UnknownError),
-                Err(Error::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    break;
-                }
-                Err(err) => {
-                    eprintln!("packet read error: {err:#?}");
-                    return Err(StreamErr::UnknownError);
-                }
-            };
+    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> JoinHandle<Result<(), StreamErr>> {
+        let codec_params = self.codec_params.clone();
+        let track_id = self.track_id;
+        let channels_size = self.channels_size;
+       //
+        let mut format = std::mem::take(&mut self.probe_result.format);
+        let mut resampler = if self.output_sample_rate != self.input_sample_rate {
+            Fft::<f32>::new(
+                self.input_sample_rate as usize,
+                self.output_sample_rate as usize,
+                CHUNK_SIZE,
+                2,
+                self.channels_size as usize,
+                FixedSync::Input,
+            )
+                .ok()
+        } else {
+            None
+        };
 
-            while !format.metadata().is_latest() {
-                format.metadata().pop();
-            }
-
-            if packet.track_id() != self.track_id {
-                continue;
-            }
-
-            match decoder.decode(&packet) {
-                Ok(_decoded) => {
-                    if sample_buf.is_none() {
-                        let spec = *_decoded.spec();
-                        let capacity = _decoded.capacity() as u64;
-                        sample_buf = Some(SampleBuffer::<f32>::new(capacity, spec));
+        thread::spawn(move ||->Result<(), StreamErr> {
+            let mut resampling_buffer:Vec<f32> = Vec::new();
+            let mut sample_buf = None;
+            let dec_opts: DecoderOptions = Default::default();
+            let mut decoder = symphonia::default::get_codecs()
+                .make(&codec_params, &dec_opts)
+                .map_err(|_| StreamErr::UnsupportedCodec)?;
+            loop {
+                let packet = match format.next_packet() {
+                    Ok(packet) => packet,
+                    Err(Error::ResetRequired) => return Err(StreamErr::UnknownError),
+                    Err(Error::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        return Err(StreamErr::UnknownError);
                     }
-                    if let Some(buf) = &mut sample_buf {
-                        buf.copy_interleaved_ref(_decoded);
-                        resample(
-                            &mut self.resampler,
-                            &mut self.resampling_buffer,
-                            &sender,
-                            self.channels_size,
-                            buf.samples(),
-                        )?;
+                    Err(err) => {
+                        eprintln!("packet read error: {err:#?}");
+                        return Err(StreamErr::UnknownError);
                     }
+                };
+
+                while !format.metadata().is_latest() {
+                    format.metadata().pop();
                 }
-                Err(Error::IoError(_)) | Err(Error::DecodeError(_)) => continue,
-                Err(_) => return Err(StreamErr::UnknownError),
+
+                if packet.track_id() != track_id {
+                    continue;
+                }
+
+                match decoder.decode(&packet) {
+                    Ok(_decoded) => {
+                        if sample_buf.is_none() {
+                            let spec = *_decoded.spec();
+                            let capacity = _decoded.capacity() as u64;
+                            sample_buf = Some(SampleBuffer::<f32>::new(capacity, spec));
+                        }
+                        if let Some(buf) = &mut sample_buf {
+                            buf.copy_interleaved_ref(_decoded);
+                            resample(
+                                &mut resampler,
+                                &mut resampling_buffer,
+                                &sender,
+                                channels_size,
+                                buf.samples(),
+                            )?;
+                        }
+                    }
+                    Err(Error::IoError(_)) | Err(Error::DecodeError(_)) => continue,
+                    Err(_) => return Err(StreamErr::UnknownError),
+                }
             }
-        }
-        Ok(())
+        })
+
+
+
     }
 
     fn pause(&mut self) -> Result<(), StreamErr> {

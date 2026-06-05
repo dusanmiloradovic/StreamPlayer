@@ -6,6 +6,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::thread::JoinHandle;
 use ringbuf::producer::Producer;
 use ringbuf::traits::Consumer;
 use ringbuf::storage::Heap;
@@ -44,7 +45,7 @@ struct ChannelData {
 }
 
 impl Streamer for Mixer {
-    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> Result<(), StreamErr> {
+    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> JoinHandle<Result<(), StreamErr>> {
 
         let target_latency_secs = 1usize; // TODO make this constant across the project
         let ring_size = self.get_output_sample_rate() as usize
@@ -73,7 +74,7 @@ impl Streamer for Mixer {
         for j in 0..streamers.len() {
             let streamer = &mut streamers[j];
             let (sender, receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-            streamer.play(sender)?;
+            streamer.play(sender);
             let atomic_index = indices[j].clone();
             let atomic_counter = frame_counters[j].clone();
             let  mut ring_producer = ring_producers.remove(0);

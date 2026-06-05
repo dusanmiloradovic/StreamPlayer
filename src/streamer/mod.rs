@@ -1,4 +1,5 @@
 use std::sync::mpsc::SyncSender;
+use std::thread::JoinHandle;
 
 pub mod single;
 pub mod mixer;
@@ -20,7 +21,7 @@ pub enum StreamErr {
 }
 
 pub trait Streamer: Send {
-    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> Result<(), StreamErr>;
+    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> JoinHandle<Result<(), StreamErr>>;
     fn pause(&mut self) -> Result<(), StreamErr>;
     fn resume(&mut self) -> Result<(), StreamErr>;
     fn stop(&self) -> Result<(), StreamErr>;
