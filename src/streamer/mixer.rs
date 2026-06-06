@@ -104,19 +104,23 @@ impl Streamer for Mixer {
     }
 
     fn pause(&mut self) -> Result<(), StreamErr> {
-        todo!()
+        self.streamers.iter_mut().try_for_each(|s| s.pause())
     }
 
     fn resume(&mut self) -> Result<(), StreamErr> {
-        todo!()
+        self.streamers.iter_mut().try_for_each(|s| s.resume())
     }
 
     fn stop(&self) -> Result<(), StreamErr> {
-        todo!()
+        self.streamers.iter().try_for_each(|s| s.stop())
     }
 
-    fn seek(&self, _time: u64) -> Result<(), StreamErr> {
-        todo!()
+    fn seek(&self, time: u64) -> Result<(), StreamErr> {
+        self.streamers.iter().try_for_each(|s| s.seek(time))
+    }
+
+    fn rewind(&self) -> Result<(), StreamErr> {
+        self.streamers.iter().try_for_each(|s| s.rewind())
     }
 
     fn get_input_sample_rate(&self) -> u32 {

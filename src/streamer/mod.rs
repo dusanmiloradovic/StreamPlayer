@@ -21,6 +21,7 @@ pub enum StreamErr {
     OutputStreamError,
     SendError,
     AlreadyPlaying,
+    NotPlaying,
 }
 
 pub trait Streamer: Send {
@@ -29,6 +30,7 @@ pub trait Streamer: Send {
     fn resume(&mut self) -> Result<(), StreamErr>;
     fn stop(&self) -> Result<(), StreamErr>;
     fn seek(&self, time: u64) -> Result<(), StreamErr>;
+    fn rewind(&self) -> Result<(), StreamErr>;
     fn get_input_sample_rate(&self) -> u32;
     fn get_input_channel_count(&self) -> u16;
     fn get_output_sample_rate(&self) -> u32; // the output sample rate should match the closest supported sample rate, and the stream should be resampled to this rate.
