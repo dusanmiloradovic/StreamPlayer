@@ -5,7 +5,7 @@ use cpal::traits::{DeviceTrait, HostTrait};
 use rubato::{Fft, FixedSync, Resampler};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::SyncSender;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
 use symphonia::core::audio::SampleBuffer;
@@ -23,11 +23,11 @@ const CHUNK_SIZE: usize = 1024;
 enum StreamerCommand {
     Seek(SeekTo),
     Stop,
-    Rewind
+    Rewind,
 }
 
 pub struct SingleStreamer {
-    paused: bool,
+    paused: Arc<AtomicBool>,
     resampler: Option<Fft<f32>>,
     resampling_buffer: Vec<f32>,
     input_sample_rate: u32,
@@ -37,7 +37,7 @@ pub struct SingleStreamer {
     codec_params: CodecParameters,
     output_sample_rate: u32,
     finished: Arc<AtomicBool>,
-    command_tx: Option<mpsc::SyncSender<StreamerCommand>>
+    command_tx: Option<mpsc::SyncSender<StreamerCommand>>,
 }
 
 // Free function to avoid borrow conflict between self.probe_result.format and other fields.
@@ -143,7 +143,7 @@ impl SingleStreamer {
         };
 
         Ok(Self {
-            paused: false,
+            paused: Arc::new(AtomicBool::new(false)),
             resampler,
             resampling_buffer: Vec::new(),
             input_sample_rate: sample_rate,
@@ -153,7 +153,7 @@ impl SingleStreamer {
             codec_params,
             output_sample_rate: config_sample_rate,
             finished: Arc::new(AtomicBool::new(false)),
-            command_tx: None
+            command_tx: None,
         })
     }
 }
@@ -173,7 +173,7 @@ impl Streamer for SingleStreamer {
                 self.channels_size as usize,
                 FixedSync::Input,
             )
-                .ok()
+            .ok()
         } else {
             None
         };
@@ -182,27 +182,36 @@ impl Streamer for SingleStreamer {
         self.command_tx = Some(cmd_tx);
 
         let finished = self.finished.clone();
+        let paused = self.paused.clone();
         thread::spawn(move || -> Result<(), StreamErr> {
             let mut format = format.ok_or(StreamErr::AlreadyPlaying)?;
             let mut resampler = resampler;
-            let mut resampling_buffer:Vec<f32> = Vec::new();
+            let mut resampling_buffer: Vec<f32> = Vec::new();
             let mut sample_buf = None;
             let dec_opts: DecoderOptions = Default::default();
             let mut decoder = symphonia::default::get_codecs()
                 .make(&codec_params, &dec_opts)
                 .map_err(|_| StreamErr::UnsupportedCodec)?;
             loop {
+                while paused.load(std::sync::atomic::Ordering::Acquire) {
+                    thread::sleep(std::time::Duration::from_millis(10));
+                }
                 match cmd_rx.try_recv() {
                     Ok(StreamerCommand::Seek(to)) => {
                         format.seek(SeekMode::Accurate, to).ok();
-                        decoder.reset();   // mandatory after seek
+                        decoder.reset(); // mandatory after seek
                     }
-                    Ok(StreamerCommand::Stop) => return Ok(()),
+                    Ok(StreamerCommand::Stop) => {
+                        finished.store(true, std::sync::atomic::Ordering::Relaxed);
+                        return Ok(());
+                    }
                     Ok(StreamerCommand::Rewind) => {
-                        format.seek(SeekMode::Accurate, SeekTo::TimeStamp { ts: 0, track_id }).ok();
+                        format
+                            .seek(SeekMode::Accurate, SeekTo::TimeStamp { ts: 0, track_id })
+                            .ok();
                         decoder.reset();
                     }
-                    Err(_) => {}  // nothing pending, continue
+                    Err(_) => {} // nothing pending, continue
                 }
                 let packet = match format.next_packet() {
                     Ok(packet) => packet,
@@ -255,18 +264,21 @@ impl Streamer for SingleStreamer {
     }
 
     fn pause(&mut self) -> Result<(), StreamErr> {
-        self.paused = true;
+        let paused = self.paused.clone();
+        paused.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
     fn resume(&mut self) -> Result<(), StreamErr> {
-        self.paused = false;
+        let paused = self.paused.clone();
+        paused.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
     fn stop(&self) -> Result<(), StreamErr> {
         let tx = self.command_tx.as_ref().ok_or(StreamErr::NotPlaying)?;
-        tx.send(StreamerCommand::Stop).map_err(|_| StreamErr::SendError)
+        tx.send(StreamerCommand::Stop)
+            .map_err(|_| StreamErr::SendError)
     }
 
     fn seek(&self, _time: u64) -> Result<(), StreamErr> {
@@ -275,12 +287,14 @@ impl Streamer for SingleStreamer {
             time: Time::from(_time),
             track_id: None,
         };
-        tx.send(StreamerCommand::Seek(to)).map_err(|_| StreamErr::SendError)
+        tx.send(StreamerCommand::Seek(to))
+            .map_err(|_| StreamErr::SendError)
     }
 
     fn rewind(&self) -> Result<(), StreamErr> {
         let tx = self.command_tx.as_ref().ok_or(StreamErr::NotPlaying)?;
-        tx.send(StreamerCommand::Rewind).map_err(|_| StreamErr::SendError)
+        tx.send(StreamerCommand::Rewind)
+            .map_err(|_| StreamErr::SendError)
     }
 
     fn get_input_sample_rate(&self) -> u32 {

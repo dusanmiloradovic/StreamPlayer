@@ -10,6 +10,7 @@ pub struct Mixer {
     streamers: Vec<Box<dyn Streamer>>,
     weights: Vec<f32>,
     finished: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
 }
 
 impl Mixer {
@@ -23,7 +24,12 @@ impl Mixer {
             }
         }
         // TODO check all output sample rates are the same.
-        Self { streamers, weights, finished: Arc::new(AtomicBool::new(false)) }
+        Self {
+            streamers,
+            weights,
+            finished: Arc::new(AtomicBool::new(false)),
+            stopped: Arc::new(AtomicBool::new(false)),
+        }
     }
 }
 
@@ -40,9 +46,8 @@ impl Streamer for Mixer {
             .map(|_| Arc::new(Mutex::new(VecDeque::new())))
             .collect();
 
-        let finished_flags: Vec<Arc<AtomicBool>> = streamers.iter()
-            .map(|s| s.finished_flag())
-            .collect();
+        let finished_flags: Vec<Arc<AtomicBool>> =
+            streamers.iter().map(|s| s.finished_flag()).collect();
 
         let (sync_sender, sync_receiver) = mpsc::sync_channel::<usize>(8);
 
@@ -55,7 +60,9 @@ impl Streamer for Mixer {
             let ssender = sync_sender.clone();
             let finished_flag = finished_flags[j].clone();
             thread::spawn(move || {
-                while let Ok(samples) = inner_receiver.recv() && !finished_flag.load(std::sync::atomic::Ordering::Acquire){
+                while let Ok(samples) = inner_receiver.recv()
+                    && !finished_flag.load(std::sync::atomic::Ordering::Acquire)
+                {
                     shared_buf.lock().unwrap().extend(samples.iter().copied());
                     atomic_index.fetch_add(samples.len(), std::sync::atomic::Ordering::AcqRel);
                     ssender.send(j).unwrap();
@@ -64,10 +71,11 @@ impl Streamer for Mixer {
         }
 
         let finished = self.finished.clone();
+        let stopped = self.stopped.clone();
         thread::spawn(move || -> Result<(), StreamErr> {
             let mut min_index;
             let mut prev_index = 0usize;
-            while let Ok(_) = sync_receiver.recv() {
+            while let Ok(_) = sync_receiver.recv() && !stopped.load(std::sync::atomic::Ordering::Acquire) {
                 min_index = usize::MAX;
                 for j in 0..streamers_len {
                     if finished_flags[j].load(std::sync::atomic::Ordering::Acquire) {
@@ -112,6 +120,8 @@ impl Streamer for Mixer {
     }
 
     fn stop(&self) -> Result<(), StreamErr> {
+        let stopped = self.stopped.clone();
+        stopped.store(true, std::sync::atomic::Ordering::Relaxed);
         self.streamers.iter().try_for_each(|s| s.stop())
     }
 
