@@ -29,6 +29,21 @@ pub struct Mixer {
     // Tracks samples mixed so far; new channels start their index here to avoid
     // stalling channels that are already ahead.
     play_position: Arc<AtomicUsize>,
+    // Shared state so MixerHandle can access channels after Mixer is moved.
+    shared:        Arc<Mutex<MixerShared>>,
+}
+
+struct MixerShared {
+    command_tx:  Option<Sender<MixerCommand>>,
+    sync_sender: Option<Sender<usize>>,
+}
+
+/// A handle to a `Mixer` that can be retained by the caller after the `Mixer`
+/// is moved into a player. Allows adding/removing channels while playback is
+/// running.
+pub struct MixerHandle {
+    shared:        Arc<Mutex<MixerShared>>,
+    play_position: Arc<AtomicUsize>,
 }
 
 impl Mixer {
@@ -48,53 +63,73 @@ impl Mixer {
             command_tx:    None,
             sync_sender:   None,
             play_position: Arc::new(AtomicUsize::new(0)),
+            shared:        Arc::new(Mutex::new(MixerShared {
+                command_tx:  None,
+                sync_sender: None,
+            })),
         }
     }
 
-    pub fn add(&mut self, mut streamer: Box<dyn Streamer>, weight: u32, autorewind:bool) {
+    /// Returns a `MixerHandle` that can be used to add/remove channels after
+    /// the `Mixer` has been moved into a player and playback has started.
+    pub fn handle(&self) -> MixerHandle {
+        MixerHandle {
+            shared:        self.shared.clone(),
+            play_position: self.play_position.clone(),
+        }
+    }
+
+    pub fn add(&mut self, streamer: Box<dyn Streamer>, weight: u32, auto_seek: bool) {
         let weight_arc = Arc::new(AtomicU32::new(weight));
 
         if let Some(cmd_tx) = &self.command_tx {
-            // Already playing: do all the wiring here where we have &mut self,
-            // then send the prepared Arcs to the mixing thread via the command channel.
-            let current_pos = self.play_position.load(Relaxed);
-            let shared_buf  = Arc::new(Mutex::new(VecDeque::new()));
-            let index       = Arc::new(AtomicUsize::new(current_pos));
-            let finished    = streamer.finished_flag();
-
-            let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-            streamer.play(inner_sender);
-            if autorewind {
-                //TODO need to get the current position of the player first, and then rewind
-            }
-
-            let sb = shared_buf.clone();
-            let ix = index.clone();
-            let ff = finished.clone();
-            let ss = self.sync_sender.as_ref().unwrap().clone();
-            thread::spawn(move || {
-                while let Ok(samples) = inner_receiver.recv()
-                    && !ff.load(Acquire)
-                {
-                    sb.lock().unwrap().extend(samples.iter().copied());
-                    ix.fetch_add(samples.len(), AcqRel);
-                    ss.send(0).unwrap_or(());
-                }
-            });
-
-            cmd_tx.send(MixerCommand::Add {
-                shared_buf,
-                index,
-                finished,
-                weight: weight_arc.clone(),
-            }).unwrap_or(());
-
-            self.streamers.push(streamer);
+            Self::add_live(cmd_tx, self.sync_sender.as_ref().unwrap(), &self.play_position, streamer, weight_arc.clone(), auto_seek);
             self.weights.push(weight_arc);
         } else {
             self.streamers.push(streamer);
             self.weights.push(weight_arc);
         }
+    }
+
+    fn add_live(
+        cmd_tx: &Sender<MixerCommand>,
+        sync_sender: &Sender<usize>,
+        play_position: &Arc<AtomicUsize>,
+        mut streamer: Box<dyn Streamer>,
+        weight_arc: Arc<AtomicU32>,
+        auto_seek: bool,
+    ) {
+        let current_pos = play_position.load(Relaxed);
+        let shared_buf  = Arc::new(Mutex::new(VecDeque::new()));
+        let index       = Arc::new(AtomicUsize::new(current_pos));
+        let finished    = streamer.finished_flag();
+
+        let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
+        streamer.play(inner_sender);
+        if auto_seek {
+            //TODO need to get the current position of the player first, and then seek
+        }
+
+        let sb = shared_buf.clone();
+        let ix = index.clone();
+        let ff = finished.clone();
+        let ss = sync_sender.clone();
+        thread::spawn(move || {
+            while let Ok(samples) = inner_receiver.recv()
+                && !ff.load(Acquire)
+            {
+                sb.lock().unwrap().extend(samples.iter().copied());
+                ix.fetch_add(samples.len(), AcqRel);
+                ss.send(0).unwrap_or(());
+            }
+        });
+
+        cmd_tx.send(MixerCommand::Add {
+            shared_buf,
+            index,
+            finished,
+            weight: weight_arc,
+        }).unwrap_or(());
     }
 
     pub fn stop_channel(&self, ch_no: usize) {
@@ -116,12 +151,36 @@ impl Mixer {
     }
 }
 
+impl MixerHandle {
+    pub fn add(&self, streamer: Box<dyn Streamer>, weight: u32, auto_seek: bool) {
+        let shared = self.shared.lock().unwrap();
+        if let (Some(cmd_tx), Some(sync_sender)) = (&shared.command_tx, &shared.sync_sender) {
+            let weight_arc = Arc::new(AtomicU32::new(weight));
+            Mixer::add_live(cmd_tx, sync_sender, &self.play_position, streamer, weight_arc, auto_seek);
+        }
+    }
+
+    pub fn stop_channel(&self, ch_no: usize) {
+        let shared = self.shared.lock().unwrap();
+        if let Some(tx) = &shared.command_tx {
+            tx.send(MixerCommand::Stop(ch_no)).unwrap_or(());
+        }
+    }
+}
+
 impl Streamer for Mixer {
     fn play(&mut self, sender: SyncSender<Vec<f32>>) -> JoinHandle<Result<(), StreamErr>> {
         let (sync_sender, sync_receiver) = bounded::<usize>(8);
         let (cmd_tx, cmd_rx) = bounded::<MixerCommand>(4);
         self.command_tx  = Some(cmd_tx);
         self.sync_sender = Some(sync_sender.clone());
+
+        // Publish channels to the shared state so MixerHandle can use them.
+        {
+            let mut shared = self.shared.lock().unwrap();
+            shared.command_tx  = self.command_tx.clone();
+            shared.sync_sender = self.sync_sender.clone();
+        }
 
         // These Vecs are owned exclusively by the mixing thread. The Add command
         // arm appends to them directly — no locking required.
