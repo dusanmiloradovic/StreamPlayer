@@ -1,112 +1,245 @@
 use crate::streamer::{StreamErr, Streamer};
+use crossbeam_channel::{bounded, select, Sender};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize};
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 
+enum MixerCommand {
+    Stop(usize),
+    Add {
+        shared_buf: Arc<Mutex<VecDeque<f32>>>,
+        index:      Arc<AtomicUsize>,
+        finished:   Arc<AtomicBool>,
+        weight:     Arc<AtomicU32>,
+    },
+}
+
 pub struct Mixer {
-    streamers: Vec<Box<dyn Streamer>>,
-    weights: Vec<f32>,
-    finished: Arc<AtomicBool>,
-    stopped: Arc<AtomicBool>,
+    streamers:     Vec<Box<dyn Streamer>>,
+    weights:       Vec<Arc<AtomicU32>>,
+    finished:      Arc<AtomicBool>,
+    stopped:       Arc<AtomicBool>,
+    command_tx:    Option<Sender<MixerCommand>>,
+    // Retained after play() so add() can give new forwarder threads the ping channel.
+    sync_sender:   Option<Sender<usize>>,
+    // Tracks samples mixed so far; new channels start their index here to avoid
+    // stalling channels that are already ahead.
+    play_position: Arc<AtomicUsize>,
 }
 
 impl Mixer {
-    pub fn new(streamers: Vec<Box<dyn Streamer>>, weights: Vec<f32>) -> Self {
+    pub fn new(streamers: Vec<Box<dyn Streamer>>, weights: Vec<u32>) -> Self {
         if weights.len() != streamers.len() {
             panic!("weights and streamers must have the same length");
         }
-        for &w in &weights {
-            if w < 0.0 {
-                panic!("weights must be positive");
-            }
-        }
-        // TODO check all output sample rates are the same.
+        let weights = weights
+            .into_iter()
+            .map(|x| Arc::new(AtomicU32::new(x)))
+            .collect();
         Self {
             streamers,
             weights,
-            finished: Arc::new(AtomicBool::new(false)),
-            stopped: Arc::new(AtomicBool::new(false)),
+            finished:      Arc::new(AtomicBool::new(false)),
+            stopped:       Arc::new(AtomicBool::new(false)),
+            command_tx:    None,
+            sync_sender:   None,
+            play_position: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    pub fn add(&mut self, mut streamer: Box<dyn Streamer>, weight: u32, autorewind:bool) {
+        let weight_arc = Arc::new(AtomicU32::new(weight));
+
+        if let Some(cmd_tx) = &self.command_tx {
+            // Already playing: do all the wiring here where we have &mut self,
+            // then send the prepared Arcs to the mixing thread via the command channel.
+            let current_pos = self.play_position.load(Relaxed);
+            let shared_buf  = Arc::new(Mutex::new(VecDeque::new()));
+            let index       = Arc::new(AtomicUsize::new(current_pos));
+            let finished    = streamer.finished_flag();
+
+            let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
+            streamer.play(inner_sender);
+            if autorewind {
+                //TODO need to get the current position of the player first, and then rewind
+            }
+
+            let sb = shared_buf.clone();
+            let ix = index.clone();
+            let ff = finished.clone();
+            let ss = self.sync_sender.as_ref().unwrap().clone();
+            thread::spawn(move || {
+                while let Ok(samples) = inner_receiver.recv()
+                    && !ff.load(Acquire)
+                {
+                    sb.lock().unwrap().extend(samples.iter().copied());
+                    ix.fetch_add(samples.len(), AcqRel);
+                    ss.send(0).unwrap_or(());
+                }
+            });
+
+            cmd_tx.send(MixerCommand::Add {
+                shared_buf,
+                index,
+                finished,
+                weight: weight_arc.clone(),
+            }).unwrap_or(());
+
+            self.streamers.push(streamer);
+            self.weights.push(weight_arc);
+        } else {
+            self.streamers.push(streamer);
+            self.weights.push(weight_arc);
+        }
+    }
+
+    pub fn stop_channel(&self, ch_no: usize) {
+        if let Some(tx) = &self.command_tx {
+            tx.send(MixerCommand::Stop(ch_no)).unwrap_or(());
+        }
+    }
+
+    pub fn get_streamers(&self) -> &Vec<Box<dyn Streamer>> {
+        &self.streamers
+    }
+
+    pub fn get_weights(&self) -> Vec<u32> {
+        self.weights.iter().map(|w| w.load(Relaxed)).collect()
+    }
+
+    pub fn set_weight(&mut self, index: usize, weight: u32) {
+        self.weights[index].store(weight, Relaxed);
     }
 }
 
 impl Streamer for Mixer {
     fn play(&mut self, sender: SyncSender<Vec<f32>>) -> JoinHandle<Result<(), StreamErr>> {
-        let weights = self.weights.clone();
-        let streamers = &mut self.streamers;
-        let streamers_len = streamers.len();
+        let (sync_sender, sync_receiver) = bounded::<usize>(8);
+        let (cmd_tx, cmd_rx) = bounded::<MixerCommand>(4);
+        self.command_tx  = Some(cmd_tx);
+        self.sync_sender = Some(sync_sender.clone());
 
-        let indices: Vec<Arc<AtomicUsize>> = (0..streamers_len)
-            .map(|_| Arc::new(AtomicUsize::new(0)))
-            .collect();
-        let shared_bufs: Vec<Arc<Mutex<VecDeque<f32>>>> = (0..streamers_len)
-            .map(|_| Arc::new(Mutex::new(VecDeque::new())))
-            .collect();
+        // These Vecs are owned exclusively by the mixing thread. The Add command
+        // arm appends to them directly — no locking required.
+        let mut indices:        Vec<Arc<AtomicUsize>>          = Vec::new();
+        let mut shared_bufs:    Vec<Arc<Mutex<VecDeque<f32>>>> = Vec::new();
+        let mut finished_flags: Vec<Arc<AtomicBool>>           = Vec::new();
+        let mut weights:        Vec<Arc<AtomicU32>>            = Vec::new();
 
-        let finished_flags: Vec<Arc<AtomicBool>> =
-            streamers.iter().map(|s| s.finished_flag()).collect();
+        for (s, w) in self.streamers.iter_mut().zip(self.weights.iter()) {
+            let index      = Arc::new(AtomicUsize::new(0));
+            let shared_buf = Arc::new(Mutex::new(VecDeque::new()));
+            let finished   = s.finished_flag();
 
-        let (sync_sender, sync_receiver) = mpsc::sync_channel::<usize>(8);
-
-        for j in 0..streamers.len() {
-            let streamer = &mut streamers[j];
             let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-            streamer.play(inner_sender);
-            let atomic_index = indices[j].clone();
-            let shared_buf = shared_bufs[j].clone();
-            let ssender = sync_sender.clone();
-            let finished_flag = finished_flags[j].clone();
+            s.play(inner_sender);
+
+            let ix = index.clone();
+            let sb = shared_buf.clone();
+            let ff = finished.clone();
+            let ss = sync_sender.clone();
+            let j  = indices.len();
             thread::spawn(move || {
                 while let Ok(samples) = inner_receiver.recv()
-                    && !finished_flag.load(std::sync::atomic::Ordering::Acquire)
+                    && !ff.load(Acquire)
                 {
-                    shared_buf.lock().unwrap().extend(samples.iter().copied());
-                    atomic_index.fetch_add(samples.len(), std::sync::atomic::Ordering::AcqRel);
-                    ssender.send(j).unwrap();
+                    sb.lock().unwrap().extend(samples.iter().copied());
+                    ix.fetch_add(samples.len(), AcqRel);
+                    ss.send(j).unwrap_or(());
                 }
             });
+
+            indices.push(index);
+            shared_bufs.push(shared_buf);
+            finished_flags.push(finished);
+            weights.push(w.clone());
         }
 
-        let finished = self.finished.clone();
-        let stopped = self.stopped.clone();
+        let finished      = self.finished.clone();
+        let stopped       = self.stopped.clone();
+        let play_position = self.play_position.clone();
+
         thread::spawn(move || -> Result<(), StreamErr> {
-            let mut min_index;
             let mut prev_index = 0usize;
-            while let Ok(_) = sync_receiver.recv() && !stopped.load(std::sync::atomic::Ordering::Acquire) {
-                min_index = usize::MAX;
-                for j in 0..streamers_len {
-                    if finished_flags[j].load(std::sync::atomic::Ordering::Acquire) {
-                        continue;
-                    }
-                    let index = indices[j].load(std::sync::atomic::Ordering::Acquire);
-                    min_index = min_index.min(index);
-                }
-                if min_index == usize::MAX {
-                    // All streamers finished
-                    break;
-                }
-                let v_size = min_index - prev_index;
-                if v_size > 0 {
-                    prev_index = min_index;
-                    let koef = 1.0 / weights.iter().sum::<f32>();
-                    let mut output_data = vec![0.0f32; v_size];
-                    for j in 0..streamers_len {
-                        let mut buf = shared_bufs[j].lock().unwrap();
-                        let available = buf.len().min(v_size);
-                        if available == 0 {
-                            continue;
+
+            loop {
+                select! {
+                    recv(sync_receiver) -> _ => {
+                        if stopped.load(Acquire) {
+                            break;
                         }
-                        for (out, s) in output_data.iter_mut().zip(buf.drain(..available)) {
-                            *out += s * weights[j] * koef;
+
+                        let len = indices.len();
+                        let mut min_index = usize::MAX;
+                        for j in 0..len {
+                            if finished_flags[j].load(Acquire) {
+                                continue;
+                            }
+                            min_index = min_index.min(indices[j].load(Acquire));
+                        }
+
+                        if min_index == usize::MAX {
+                            break; // all channels finished
+                        }
+
+                        let v_size = min_index.saturating_sub(prev_index);
+                        if v_size > 0 {
+                            prev_index = min_index;
+                            play_position.store(prev_index, Relaxed);
+
+                            let total_weight: u32 = weights.iter()
+                                .enumerate()
+                                .filter(|(j, _)| !finished_flags[*j].load(Relaxed))
+                                .map(|(_, w)| w.load(Relaxed))
+                                .sum();
+                            let koef = if total_weight > 0 {
+                                1.0 / total_weight as f32
+                            } else {
+                                0.0
+                            };
+
+                            let mut output_data = vec![0.0f32; v_size];
+                            for j in 0..len {
+                                if finished_flags[j].load(Relaxed) {
+                                    continue;
+                                }
+                                let mut buf = shared_bufs[j].lock().unwrap();
+                                let available = buf.len().min(v_size);
+                                if available == 0 {
+                                    continue;
+                                }
+                                let weight = weights[j].load(Relaxed) as f32;
+                                for (out, s) in output_data.iter_mut().zip(buf.drain(..available)) {
+                                    *out += s * weight * koef;
+                                }
+                            }
+                            sender.send(output_data).map_err(|_| StreamErr::SendError)?;
                         }
                     }
-                    sender.send(output_data).map_err(|_| StreamErr::SendError)?;
+                    recv(cmd_rx) -> command => {
+                        let Ok(cmd) = command else { continue; };
+                        match cmd {
+                            MixerCommand::Stop(ch_no) => {
+                                if let Some(flag) = finished_flags.get(ch_no) {
+                                    flag.store(true, Relaxed);
+                                }
+                            }
+                            MixerCommand::Add { shared_buf, index, finished, weight } => {
+                                shared_bufs.push(shared_buf);
+                                indices.push(index);
+                                finished_flags.push(finished);
+                                weights.push(weight);
+                            }
+                        }
+                    }
                 }
             }
-            finished.store(true, std::sync::atomic::Ordering::Release);
+
+            finished.store(true, Release);
             Ok(())
         })
     }
@@ -120,8 +253,7 @@ impl Streamer for Mixer {
     }
 
     fn stop(&self) -> Result<(), StreamErr> {
-        let stopped = self.stopped.clone();
-        stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.stopped.store(true, Relaxed);
         self.streamers.iter().try_for_each(|s| s.stop())
     }
 

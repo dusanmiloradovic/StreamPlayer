@@ -11,7 +11,7 @@ fn main() {
     let f2 = File::open("./files/lost_in_the_city.mp3").unwrap();
     let s2 = SingleStreamer::new(Box::new(f2), "audio/mpeg".to_string()).unwrap();
     let streamers:Vec<Box<dyn Streamer>> = vec![Box::new(streamer),Box::new(s2)];
-    let weights:Vec<f32>=vec![98.5, 1.5];
+    let weights: Vec<u32> = vec![985, 15];
     let mixer = Mixer::new(streamers,weights);
     let mut player = stream_player::new_stream_player(Box::new(mixer)).unwrap();
     let handle = player.start().unwrap();
