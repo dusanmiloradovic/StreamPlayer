@@ -1,6 +1,6 @@
 use crate::streamer::{Callback, StreamErr, Streamer};
 use crossbeam_channel::{bounded, select, Sender};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize};
 use std::sync::mpsc::{Receiver, SyncSender};
@@ -31,6 +31,8 @@ pub struct Mixer {
     play_position: Arc<AtomicUsize>,
     // Shared state so MixerHandle can access channels after Mixer is moved.
     shared:        Arc<Mutex<MixerShared>>,
+    callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
+    callback_register: Option<SyncSender<u64>>,
 }
 
 struct MixerShared {
@@ -67,6 +69,8 @@ impl Mixer {
                 command_tx:  None,
                 sync_sender: None,
             })),
+            callbacks: Arc::new(Mutex::new(HashMap::new())),
+            callback_register: None,
         }
     }
 
@@ -340,11 +344,9 @@ impl Streamer for Mixer {
         self.finished.clone()
     }
 
-    fn add_callback(&mut self, callback_time: u64, callback: Box<dyn Fn(u64) + Send>) {
-        todo!()
+    fn add_callback(&mut self, callback_time: u64, callback: Box<dyn Fn() + Send>) {
+        self.callback_register.as_ref().unwrap().send(callback_time).unwrap();
+        self.callbacks.lock().unwrap().insert(callback_time, callback);
     }
 
-    fn execute_callback(&self, callback_time: u64) {
-        todo!()
-    }
 }

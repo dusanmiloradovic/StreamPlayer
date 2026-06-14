@@ -1,12 +1,12 @@
-use std::collections::HashMap;
 use crate::streamer::{Callback, StreamErr, Streamer};
 use audioadapter_buffers::direct::InterleavedSlice;
 use cpal::default_host;
 use cpal::traits::{DeviceTrait, HostTrait};
 use rubato::{Fft, FixedSync, Resampler};
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, SyncSender};
-use std::sync::{Arc, mpsc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use symphonia::core::audio::SampleBuffer;
@@ -14,11 +14,11 @@ use symphonia::core::codecs::{CodecParameters, DecoderOptions};
 use symphonia::core::errors::Error;
 use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 
+use crate::streamer::utils::execute_callback;
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::{Hint, ProbeResult};
 use symphonia::core::units::Time;
-use crate::streamer::utils::execute_callback;
 
 const CHUNK_SIZE: usize = 1024;
 
@@ -39,9 +39,10 @@ pub struct SingleStreamer {
     codec_params: CodecParameters,
     output_sample_rate: u32,
     finished: Arc<AtomicBool>,
-    command_tx: Option<mpsc::SyncSender<StreamerCommand>>,
+    command_tx: Option<SyncSender<StreamerCommand>>,
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
     callback_register: Option<SyncSender<u64>>,
+    pending_callbacks: Vec<u64>,
 }
 
 // Free function to avoid borrow conflict between self.probe_result.format and other fields.
@@ -160,12 +161,24 @@ impl SingleStreamer {
             command_tx: None,
             callbacks: Arc::new(Mutex::new(HashMap::new())),
             callback_register: None,
+            pending_callbacks: Vec::new(),
         })
     }
 }
 
 impl Streamer for SingleStreamer {
-    fn play(&mut self, sender: SyncSender<Vec<f32>>, callback_receiver: Receiver<Callback>, callback_register: SyncSender<u64>) -> JoinHandle<Result<(), StreamErr>> {
+    fn play(
+        &mut self,
+        sender: SyncSender<Vec<f32>>,
+        callback_receiver: Receiver<Callback>,
+        callback_register: SyncSender<u64>,
+    ) -> JoinHandle<Result<(), StreamErr>> {
+        self.pending_callbacks.iter().for_each(|callback_time| {
+            callback_register.send(*callback_time).unwrap();
+        });
+        self.callback_register = Some(callback_register);
+
+
         let codec_params = self.codec_params.clone();
         let track_id = self.track_id;
         let channels_size = self.channels_size;
@@ -221,9 +234,9 @@ impl Streamer for SingleStreamer {
                     }
                     Err(_) => {} // nothing pending, continue
                 }
-                match callback_receiver.try_recv(){
+                match callback_receiver.try_recv() {
                     Ok(Callback::Callback(callback_time)) => {
-                       execute_callback(&callbacks,callback_time);
+                        execute_callback(&callbacks, callback_time);
                     }
                     Err(_) => {}
                 }
@@ -329,8 +342,18 @@ impl Streamer for SingleStreamer {
     }
 
     fn add_callback(&mut self, callback_time: u64, callback: Box<dyn Fn() + Send>) {
-        self.callback_register.as_ref().unwrap().send(callback_time).unwrap();
-        self.callbacks.lock().unwrap().insert(callback_time, callback);
-    }
+        // TODO if the callback is added before the play the below code will panic
+        // register the callback times somewhere in that case
+        // and send them on play
+        if let Some(cr) = &self.callback_register {
+            cr.send(callback_time).unwrap();
+        }else{
+            self.pending_callbacks.push(callback_time);
+        }
 
+        self.callbacks
+            .lock()
+            .unwrap()
+            .insert(callback_time, callback);
+    }
 }
