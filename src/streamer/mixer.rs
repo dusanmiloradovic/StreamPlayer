@@ -1,9 +1,9 @@
-use crate::streamer::{StreamErr, Streamer};
+use crate::streamer::{Callback, StreamErr, Streamer};
 use crossbeam_channel::{bounded, select, Sender};
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize};
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
@@ -169,7 +169,7 @@ impl MixerHandle {
 }
 
 impl Streamer for Mixer {
-    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> JoinHandle<Result<(), StreamErr>> {
+    fn play(&mut self, sender: SyncSender<Vec<f32>>, callback_receiver: Receiver<Callback>) -> JoinHandle<Result<(), StreamErr>> {
         let (sync_sender, sync_receiver) = bounded::<usize>(8);
         let (cmd_tx, cmd_rx) = bounded::<MixerCommand>(4);
         self.command_tx  = Some(cmd_tx);
@@ -338,5 +338,13 @@ impl Streamer for Mixer {
 
     fn finished_flag(&self) -> Arc<AtomicBool> {
         self.finished.clone()
+    }
+
+    fn add_callback(&mut self, callback_time: u64, callback: Box<dyn Fn(u64) + Send>) {
+        todo!()
+    }
+
+    fn execute_callback(&self, callback_time: u64) {
+        todo!()
     }
 }

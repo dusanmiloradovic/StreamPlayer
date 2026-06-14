@@ -1,11 +1,12 @@
-use crate::streamer::{StreamErr, Streamer};
+use std::collections::HashMap;
+use crate::streamer::{Callback, StreamErr, Streamer};
 use audioadapter_buffers::direct::InterleavedSlice;
 use cpal::default_host;
 use cpal::traits::{DeviceTrait, HostTrait};
 use rubato::{Fft, FixedSync, Resampler};
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, mpsc};
+use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::{Arc, mpsc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use symphonia::core::audio::SampleBuffer;
@@ -38,6 +39,7 @@ pub struct SingleStreamer {
     output_sample_rate: u32,
     finished: Arc<AtomicBool>,
     command_tx: Option<mpsc::SyncSender<StreamerCommand>>,
+    callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn(u64) + Send>>>>,
 }
 
 // Free function to avoid borrow conflict between self.probe_result.format and other fields.
@@ -154,12 +156,13 @@ impl SingleStreamer {
             output_sample_rate: config_sample_rate,
             finished: Arc::new(AtomicBool::new(false)),
             command_tx: None,
+            callbacks: HashMap::new(),
         })
     }
 }
 
 impl Streamer for SingleStreamer {
-    fn play(&mut self, sender: SyncSender<Vec<f32>>) -> JoinHandle<Result<(), StreamErr>> {
+    fn play(&mut self, sender: SyncSender<Vec<f32>>, callback_receiver: Receiver<Callback>) -> JoinHandle<Result<(), StreamErr>> {
         let codec_params = self.codec_params.clone();
         let track_id = self.track_id;
         let channels_size = self.channels_size;
@@ -183,6 +186,8 @@ impl Streamer for SingleStreamer {
 
         let finished = self.finished.clone();
         let paused = self.paused.clone();
+
+        let callbacks = self.callbacks.clone();
         thread::spawn(move || -> Result<(), StreamErr> {
             let mut format = format.ok_or(StreamErr::AlreadyPlaying)?;
             let mut resampler = resampler;
@@ -213,6 +218,19 @@ impl Streamer for SingleStreamer {
                     }
                     Err(_) => {} // nothing pending, continue
                 }
+                match callback_receiver.try_recv(){
+                    Ok(Callback::Callback(callback_time)) => {
+                        match callbacks.lock().unwrap().get(&callback_time){
+                            Some(callback) => callback(callback_time),
+                            None => {
+                                println!("Callback not found");
+                                // we can have multiple child streamers (like in mixer, and only one child can have a callback"
+                            }
+                        }
+                    }
+                    Err(_) => {}
+                }
+
                 let packet = match format.next_packet() {
                     Ok(packet) => packet,
                     Err(Error::ResetRequired) => {
@@ -311,5 +329,19 @@ impl Streamer for SingleStreamer {
 
     fn finished_flag(&self) -> Arc<AtomicBool> {
         self.finished.clone()
+    }
+
+    fn add_callback(&mut self, callback_time: u64, callback: Box<dyn Fn(u64) + Send>) {
+        self.callbacks.lock().unwrap().insert(callback_time, callback);
+    }
+
+    fn execute_callback(&self, callback_time: u64) {
+       match self.callbacks.lock().unwrap().get(&callback_time){
+           Some(callback) => callback(callback_time),
+           None => {
+               println!("Callback not found");
+               // we can have multiple child streamers (like in mixer, and only one child can have a callback"
+           }
+       }
     }
 }
