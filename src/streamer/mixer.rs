@@ -12,31 +12,31 @@ enum MixerCommand {
     Stop(usize),
     Add {
         shared_buf: Arc<Mutex<VecDeque<f32>>>,
-        index:      Arc<AtomicUsize>,
-        finished:   Arc<AtomicBool>,
-        weight:     Arc<AtomicU32>,
+        index: Arc<AtomicUsize>,
+        finished: Arc<AtomicBool>,
+        weight: Arc<AtomicU32>,
     },
 }
 
 pub struct Mixer {
-    streamers:     Vec<Box<dyn Streamer>>,
-    weights:       Vec<Arc<AtomicU32>>,
-    finished:      Arc<AtomicBool>,
-    stopped:       Arc<AtomicBool>,
-    command_tx:    Option<Sender<MixerCommand>>,
+    streamers: Vec<Box<dyn Streamer>>,
+    weights: Vec<Arc<AtomicU32>>,
+    finished: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
+    command_tx: Option<Sender<MixerCommand>>,
     // Retained after play() so add() can give new forwarder threads the ping channel.
-    sync_sender:   Option<Sender<usize>>,
+    sync_sender: Option<Sender<usize>>,
     // Tracks samples mixed so far; new channels start their index here to avoid
     // stalling channels that are already ahead.
     play_position: Arc<AtomicUsize>,
     // Shared state so MixerHandle can access channels after Mixer is moved.
-    shared:        Arc<Mutex<MixerShared>>,
+    shared: Arc<Mutex<MixerShared>>,
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
     callback_register: Option<SyncSender<u64>>,
 }
 
 struct MixerShared {
-    command_tx:  Option<Sender<MixerCommand>>,
+    command_tx: Option<Sender<MixerCommand>>,
     sync_sender: Option<Sender<usize>>,
 }
 
@@ -44,7 +44,7 @@ struct MixerShared {
 /// is moved into a player. Allows adding/removing channels while playback is
 /// running.
 pub struct MixerHandle {
-    shared:        Arc<Mutex<MixerShared>>,
+    shared: Arc<Mutex<MixerShared>>,
     play_position: Arc<AtomicUsize>,
 }
 
@@ -60,13 +60,13 @@ impl Mixer {
         Self {
             streamers,
             weights,
-            finished:      Arc::new(AtomicBool::new(false)),
-            stopped:       Arc::new(AtomicBool::new(false)),
-            command_tx:    None,
-            sync_sender:   None,
+            finished: Arc::new(AtomicBool::new(false)),
+            stopped: Arc::new(AtomicBool::new(false)),
+            command_tx: None,
+            sync_sender: None,
             play_position: Arc::new(AtomicUsize::new(0)),
-            shared:        Arc::new(Mutex::new(MixerShared {
-                command_tx:  None,
+            shared: Arc::new(Mutex::new(MixerShared {
+                command_tx: None,
                 sync_sender: None,
             })),
             callbacks: Arc::new(Mutex::new(HashMap::new())),
@@ -78,7 +78,7 @@ impl Mixer {
     /// the `Mixer` has been moved into a player and playback has started.
     pub fn handle(&self) -> MixerHandle {
         MixerHandle {
-            shared:        self.shared.clone(),
+            shared: self.shared.clone(),
             play_position: self.play_position.clone(),
         }
     }
@@ -87,7 +87,14 @@ impl Mixer {
         let weight_arc = Arc::new(AtomicU32::new(weight));
 
         if let Some(cmd_tx) = &self.command_tx {
-            Self::add_live(cmd_tx, self.sync_sender.as_ref().unwrap(), &self.play_position, streamer, weight_arc.clone(), auto_seek);
+            Self::add_live(
+                cmd_tx,
+                self.sync_sender.as_ref().unwrap(),
+                &self.play_position,
+                streamer,
+                weight_arc.clone(),
+                auto_seek,
+            );
             self.weights.push(weight_arc);
         } else {
             self.streamers.push(streamer);
@@ -104,9 +111,9 @@ impl Mixer {
         auto_seek: bool,
     ) {
         let current_pos = play_position.load(Relaxed);
-        let shared_buf  = Arc::new(Mutex::new(VecDeque::new()));
-        let index       = Arc::new(AtomicUsize::new(current_pos));
-        let finished    = streamer.finished_flag();
+        let shared_buf = Arc::new(Mutex::new(VecDeque::new()));
+        let index = Arc::new(AtomicUsize::new(current_pos));
+        let finished = streamer.finished_flag();
 
         let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
         streamer.play(inner_sender);
@@ -128,12 +135,14 @@ impl Mixer {
             }
         });
 
-        cmd_tx.send(MixerCommand::Add {
-            shared_buf,
-            index,
-            finished,
-            weight: weight_arc,
-        }).unwrap_or(());
+        cmd_tx
+            .send(MixerCommand::Add {
+                shared_buf,
+                index,
+                finished,
+                weight: weight_arc,
+            })
+            .unwrap_or(());
     }
 
     pub fn stop_channel(&self, ch_no: usize) {
@@ -160,7 +169,14 @@ impl MixerHandle {
         let shared = self.shared.lock().unwrap();
         if let (Some(cmd_tx), Some(sync_sender)) = (&shared.command_tx, &shared.sync_sender) {
             let weight_arc = Arc::new(AtomicU32::new(weight));
-            Mixer::add_live(cmd_tx, sync_sender, &self.play_position, streamer, weight_arc, auto_seek);
+            Mixer::add_live(
+                cmd_tx,
+                sync_sender,
+                &self.play_position,
+                streamer,
+                weight_arc,
+                auto_seek,
+            );
         }
     }
 
@@ -173,30 +189,35 @@ impl MixerHandle {
 }
 
 impl Streamer for Mixer {
-    fn play(&mut self, sender: SyncSender<Vec<f32>>, callback_receiver: Receiver<Callback>) -> JoinHandle<Result<(), StreamErr>> {
+    fn play(
+        &mut self,
+        sender: SyncSender<Vec<f32>>,
+        callback_receiver: Receiver<Callback>,
+        callback_register: SyncSender<u64>,
+    ) -> JoinHandle<Result<(), StreamErr>> {
         let (sync_sender, sync_receiver) = bounded::<usize>(8);
         let (cmd_tx, cmd_rx) = bounded::<MixerCommand>(4);
-        self.command_tx  = Some(cmd_tx);
+        self.command_tx = Some(cmd_tx);
         self.sync_sender = Some(sync_sender.clone());
 
         // Publish channels to the shared state so MixerHandle can use them.
         {
             let mut shared = self.shared.lock().unwrap();
-            shared.command_tx  = self.command_tx.clone();
+            shared.command_tx = self.command_tx.clone();
             shared.sync_sender = self.sync_sender.clone();
         }
 
         // These Vecs are owned exclusively by the mixing thread. The Add command
         // arm appends to them directly — no locking required.
-        let mut indices:        Vec<Arc<AtomicUsize>>          = Vec::new();
-        let mut shared_bufs:    Vec<Arc<Mutex<VecDeque<f32>>>> = Vec::new();
-        let mut finished_flags: Vec<Arc<AtomicBool>>           = Vec::new();
-        let mut weights:        Vec<Arc<AtomicU32>>            = Vec::new();
+        let mut indices: Vec<Arc<AtomicUsize>> = Vec::new();
+        let mut shared_bufs: Vec<Arc<Mutex<VecDeque<f32>>>> = Vec::new();
+        let mut finished_flags: Vec<Arc<AtomicBool>> = Vec::new();
+        let mut weights: Vec<Arc<AtomicU32>> = Vec::new();
 
         for (s, w) in self.streamers.iter_mut().zip(self.weights.iter()) {
-            let index      = Arc::new(AtomicUsize::new(0));
+            let index = Arc::new(AtomicUsize::new(0));
             let shared_buf = Arc::new(Mutex::new(VecDeque::new()));
-            let finished   = s.finished_flag();
+            let finished = s.finished_flag();
 
             let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
             s.play(inner_sender);
@@ -205,7 +226,7 @@ impl Streamer for Mixer {
             let sb = shared_buf.clone();
             let ff = finished.clone();
             let ss = sync_sender.clone();
-            let j  = indices.len();
+            let j = indices.len();
             thread::spawn(move || {
                 while let Ok(samples) = inner_receiver.recv()
                     && !ff.load(Acquire)
@@ -222,8 +243,8 @@ impl Streamer for Mixer {
             weights.push(w.clone());
         }
 
-        let finished      = self.finished.clone();
-        let stopped       = self.stopped.clone();
+        let finished = self.finished.clone();
+        let stopped = self.stopped.clone();
         let play_position = self.play_position.clone();
 
         thread::spawn(move || -> Result<(), StreamErr> {
@@ -345,8 +366,14 @@ impl Streamer for Mixer {
     }
 
     fn add_callback(&mut self, callback_time: u64, callback: Box<dyn Fn() + Send>) {
-        self.callback_register.as_ref().unwrap().send(callback_time).unwrap();
-        self.callbacks.lock().unwrap().insert(callback_time, callback);
+        self.callback_register
+            .as_ref()
+            .unwrap()
+            .send(callback_time)
+            .unwrap();
+        self.callbacks
+            .lock()
+            .unwrap()
+            .insert(callback_time, callback);
     }
-
 }
