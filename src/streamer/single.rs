@@ -41,6 +41,7 @@ pub struct SingleStreamer {
     finished: Arc<AtomicBool>,
     command_tx: Option<mpsc::SyncSender<StreamerCommand>>,
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
+    callback_register: Option<SyncSender<u64>>,
 }
 
 // Free function to avoid borrow conflict between self.probe_result.format and other fields.
@@ -158,12 +159,13 @@ impl SingleStreamer {
             finished: Arc::new(AtomicBool::new(false)),
             command_tx: None,
             callbacks: Arc::new(Mutex::new(HashMap::new())),
+            callback_register: None,
         })
     }
 }
 
 impl Streamer for SingleStreamer {
-    fn play(&mut self, sender: SyncSender<Vec<f32>>, callback_receiver: Receiver<Callback>) -> JoinHandle<Result<(), StreamErr>> {
+    fn play(&mut self, sender: SyncSender<Vec<f32>>, callback_receiver: Receiver<Callback>, callback_register: SyncSender<u64>) -> JoinHandle<Result<(), StreamErr>> {
         let codec_params = self.codec_params.clone();
         let track_id = self.track_id;
         let channels_size = self.channels_size;
@@ -327,6 +329,7 @@ impl Streamer for SingleStreamer {
     }
 
     fn add_callback(&mut self, callback_time: u64, callback: Box<dyn Fn() + Send>) {
+        self.callback_register.as_ref().unwrap().send(callback_time).unwrap();
         self.callbacks.lock().unwrap().insert(callback_time, callback);
     }
 

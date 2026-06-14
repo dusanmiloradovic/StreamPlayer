@@ -1,13 +1,13 @@
-use std::collections::VecDeque;
-use audio_learn::streamer::{ StreamErr, Streamer};
+use audio_learn::streamer::Callback::Callback;
+use audio_learn::streamer::{StreamErr, Streamer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{default_host, StreamError, SupportedStreamConfig};
 use ringbuf::{traits::*, HeapRb};
+use std::collections::VecDeque;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{mpsc, Arc, Mutex};
-use std::sync::atomic::Ordering::Relaxed;
 use std::thread;
-use audio_learn::streamer::Callback::Callback;
 
 pub struct StreamPlayerImpl {
     default_sample_rate: u32,
@@ -17,11 +17,13 @@ pub struct StreamPlayerImpl {
     paused: Arc<AtomicBool>,
     command_sender: Option<mpsc::Sender<StreamCommand>>,
     elapsed_samples: Arc<AtomicU64>,
-    next_sample_callback:Arc<AtomicU64>,
-    sample_callbacks:Arc<Mutex<VecDeque<u64>>>,
+    next_sample_callback: Arc<AtomicU64>,
+    sample_callbacks: Arc<Mutex<VecDeque<u64>>>,
 }
 
-pub fn new_stream_player(streamer: Box<dyn Streamer + Send>) -> Result<StreamPlayerImpl, StreamErr> {
+pub fn new_stream_player(
+    streamer: Box<dyn Streamer + Send>,
+) -> Result<StreamPlayerImpl, StreamErr> {
     StreamPlayerImpl::new(streamer)
 }
 
@@ -48,7 +50,9 @@ impl StreamPlayerImpl {
         let channels = streamer.get_input_channel_count();
         let input_sample_rate = streamer.get_input_sample_rate();
         let host = default_host();
-        let device = host.default_output_device().ok_or(StreamErr::NoOutputDevice)?;
+        let device = host
+            .default_output_device()
+            .ok_or(StreamErr::NoOutputDevice)?;
 
         let config_range = device
             .supported_output_configs()
@@ -71,8 +75,8 @@ impl StreamPlayerImpl {
             paused: Arc::new(AtomicBool::new(false)),
             command_sender: None,
             elapsed_samples: Arc::new(AtomicU64::new(0)),
-            next_sample_callback:Arc::new(AtomicU64::new(0)),
-            sample_callbacks:Arc::new(Mutex::new(VecDeque::new())),
+            next_sample_callback: Arc::new(AtomicU64::new(0)),
+            sample_callbacks: Arc::new(Mutex::new(VecDeque::new())),
         })
     }
 
@@ -86,9 +90,12 @@ impl StreamPlayerImpl {
         let sample_rate = self.default_sample_rate;
         let (mut producer, mut consumer) = HeapRb::<f32>::new(ring_size).split();
 
-
         let (command_tx, command_rx) = mpsc::channel::<StreamCommand>();
-        let (callback_tx, callback_rx) = mpsc::channel::<Callback>();
+        let (callback_tx, callback_rx) = mpsc::sync_channel::<Callback>(8);
+        let (callback_register_tx, callback_register_rx) = mpsc::sync_channel::<u64>(8);
+        // we use channels in both directions, we need here to register the timings, and
+        // the player is responsible for driving the streamers.
+        // the streamers themselves are registering the callbacks
 
         self.command_sender = Some(command_tx);
 
@@ -98,6 +105,8 @@ impl StreamPlayerImpl {
         let paused = self.paused.clone();
         let counter = self.elapsed_samples.clone();
         let next_sample_callback = self.next_sample_callback.clone();
+        let nse2 = self.next_sample_callback.clone();
+        let sample_callbacks = self.sample_callbacks.clone();
         thread::spawn(move || {
             while paused.load(Relaxed) {
                 thread::sleep(std::time::Duration::from_millis(10));
@@ -107,18 +116,28 @@ impl StreamPlayerImpl {
                 counter.fetch_add(samples.len() as u64, Relaxed);
                 push_with_backpressure(&mut producer, &samples);
                 let nse = next_sample_callback.load(Relaxed);
-                let l =counter.load(Relaxed);
-                if nse!=0 && nse>l{
+                let l = counter.load(Relaxed);
+                if nse != 0 && nse > l {
                     callback_tx.send(Callback(nse)).unwrap();
-                    next_sample_callback.store(0,Relaxed);
+                    next_sample_callback.store(0, Relaxed);
                 }
-
             }
-            let drain_time = std::time::Duration::from_secs_f32(ring_size as f32 / sample_rate as f32);
+            let drain_time =
+                std::time::Duration::from_secs_f32(ring_size as f32 / sample_rate as f32);
             thread::sleep(drain_time);
             cmd_sender.send(StreamCommand::Stop).unwrap();
         });
 
+        thread::spawn(move || {
+            while let Ok(callback) = callback_register_rx.recv() {
+                let nse = nse2.load(Relaxed);
+                if nse == 0 {
+                    nse2.store(callback, Relaxed);
+                }else{
+                    sample_callbacks.lock().unwrap().push_back(callback);
+                }
+            }
+        });
 
         let data_callback = move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
             for sample in out.iter_mut() {
@@ -134,26 +153,32 @@ impl StreamPlayerImpl {
             .map_err(|_| StreamErr::OutputStreamError)?;
         stream.play().map_err(|_| StreamErr::OutputStreamError)?;
         let mut streamer = self.streamer.take().expect("start() called twice");
-        let str2 = &streamer;
         let handle = thread::spawn(move || {
-            if let Err(e) = streamer.play(sender, callback_rx).join().unwrap_or(Err(StreamErr::UnknownError)) {
+            if let Err(e) = streamer
+                .play(sender, callback_rx, callback_register_tx)
+                .join()
+                .unwrap_or(Err(StreamErr::UnknownError))
+            {
                 eprintln!("playback error: {e:?}");
             }
             // sender dropped here → channel closes → consumer thread exits after drain
         });
         let paused = self.paused.clone();
-        let next_sample_callback = self.next_sample_callback.clone();
 
         thread::spawn(move || {
             let _stream = stream;
             //holds the stream alive until the stop command is received
             while let Ok(command) = command_rx.recv() {
                 if command == StreamCommand::Pause {
-                    _stream.pause().unwrap_or_else(|_| eprintln!("pause failed"));
+                    _stream
+                        .pause()
+                        .unwrap_or_else(|_| eprintln!("pause failed"));
                     paused.store(true, Relaxed);
                 }
                 if command == StreamCommand::Resume {
-                    _stream.play().unwrap_or_else(|_| eprintln!("resume failed"));
+                    _stream
+                        .play()
+                        .unwrap_or_else(|_| eprintln!("resume failed"));
                     paused.store(false, Relaxed);
                 }
                 if command == StreamCommand::Stop {
@@ -161,7 +186,6 @@ impl StreamPlayerImpl {
                 }
             }
         });
-
 
         Ok(handle)
     }
@@ -184,21 +208,10 @@ impl StreamPlayerImpl {
         self.streamer.take().unwrap().stop()
     }
 
-
     pub fn get_play_time_ms(&self) -> f32 {
         let elapsed_samples = self.elapsed_samples.load(Relaxed);
         let elapsed_ms = elapsed_samples as f32 / self.default_sample_rate as f32 * 1000.0;
         elapsed_ms
     }
-
-    pub fn add_sample_callback(&mut self, callback:u64) {
-        // the actual callback is done in the stream, the streamer will call the next one on the list
-        let nse = self.next_sample_callback.load(Relaxed);
-        if nse == 0 {
-            self.next_sample_callback = Arc::new(AtomicU64::new(callback));
-
-        }else{
-            self.sample_callbacks.lock().unwrap().push_back(callback);
-        }
-    }
+    
 }

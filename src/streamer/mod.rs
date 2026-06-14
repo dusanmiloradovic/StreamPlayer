@@ -3,8 +3,8 @@ use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-pub mod single;
 pub mod mixer;
+pub mod single;
 pub mod utils;
 
 #[derive(Debug)]
@@ -26,7 +26,12 @@ pub enum StreamErr {
 }
 
 pub trait Streamer: Send {
-    fn play(&mut self, sender: SyncSender<Vec<f32>>, callback_receiver: Receiver<Callback>) -> JoinHandle<Result<(), StreamErr>>;
+    fn play(
+        &mut self,
+        sender: SyncSender<Vec<f32>>,
+        callback_receiver: Receiver<Callback>,
+        callback_register: SyncSender<u64>,
+    ) -> JoinHandle<Result<(), StreamErr>>;
     fn pause(&mut self) -> Result<(), StreamErr>;
     fn resume(&mut self) -> Result<(), StreamErr>;
     fn stop(&self) -> Result<(), StreamErr>;
@@ -39,6 +44,6 @@ pub trait Streamer: Send {
     fn add_callback(&mut self, callback_time: u64, callback: Box<dyn Fn() + Send>);
 }
 
-pub enum Callback{
-    Callback(u64)
+pub enum Callback {
+    Callback(u64),
 }
