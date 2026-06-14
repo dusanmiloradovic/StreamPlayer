@@ -1,11 +1,11 @@
-use std::println;
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::mpsc::{SyncSender, Receiver};
 use std::thread::JoinHandle;
 
 pub mod single;
 pub mod mixer;
+pub mod utils;
 
 #[derive(Debug)]
 pub enum StreamErr {
@@ -36,8 +36,7 @@ pub trait Streamer: Send {
     fn get_input_channel_count(&self) -> u16;
     fn get_output_sample_rate(&self) -> u32; // the output sample rate should match the closest supported sample rate, and the stream should be resampled to this rate.
     fn finished_flag(&self) -> Arc<AtomicBool>;
-    fn add_callback(&mut self, callback_time: u64, callback: Box<dyn Fn(u64) + Send>);
-    fn execute_callback(&self, callback_time: u64);
+    fn add_callback(&mut self, callback_time: u64, callback: Box<dyn Fn() + Send>);
 }
 
 pub enum Callback{

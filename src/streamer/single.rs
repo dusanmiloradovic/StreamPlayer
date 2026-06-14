@@ -18,6 +18,7 @@ use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::{Hint, ProbeResult};
 use symphonia::core::units::Time;
+use crate::streamer::utils::execute_callback;
 
 const CHUNK_SIZE: usize = 1024;
 
@@ -39,7 +40,7 @@ pub struct SingleStreamer {
     output_sample_rate: u32,
     finished: Arc<AtomicBool>,
     command_tx: Option<mpsc::SyncSender<StreamerCommand>>,
-    callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn(u64) + Send>>>>,
+    callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
 }
 
 // Free function to avoid borrow conflict between self.probe_result.format and other fields.
@@ -156,7 +157,7 @@ impl SingleStreamer {
             output_sample_rate: config_sample_rate,
             finished: Arc::new(AtomicBool::new(false)),
             command_tx: None,
-            callbacks: HashMap::new(),
+            callbacks: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 }
@@ -220,13 +221,7 @@ impl Streamer for SingleStreamer {
                 }
                 match callback_receiver.try_recv(){
                     Ok(Callback::Callback(callback_time)) => {
-                        match callbacks.lock().unwrap().get(&callback_time){
-                            Some(callback) => callback(callback_time),
-                            None => {
-                                println!("Callback not found");
-                                // we can have multiple child streamers (like in mixer, and only one child can have a callback"
-                            }
-                        }
+                       execute_callback(&callbacks,callback_time);
                     }
                     Err(_) => {}
                 }
@@ -331,17 +326,8 @@ impl Streamer for SingleStreamer {
         self.finished.clone()
     }
 
-    fn add_callback(&mut self, callback_time: u64, callback: Box<dyn Fn(u64) + Send>) {
+    fn add_callback(&mut self, callback_time: u64, callback: Box<dyn Fn() + Send>) {
         self.callbacks.lock().unwrap().insert(callback_time, callback);
     }
 
-    fn execute_callback(&self, callback_time: u64) {
-       match self.callbacks.lock().unwrap().get(&callback_time){
-           Some(callback) => callback(callback_time),
-           None => {
-               println!("Callback not found");
-               // we can have multiple child streamers (like in mixer, and only one child can have a callback"
-           }
-       }
-    }
 }

@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use audio_learn::streamer::{StreamErr, Streamer};
+use audio_learn::streamer::{ StreamErr, Streamer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{default_host, StreamError, SupportedStreamConfig};
 use ringbuf::{traits::*, HeapRb};
@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{mpsc, Arc, Mutex};
 use std::sync::atomic::Ordering::Relaxed;
 use std::thread;
+use audio_learn::streamer::Callback::Callback;
 
 pub struct StreamPlayerImpl {
     default_sample_rate: u32,
@@ -40,7 +41,6 @@ enum StreamCommand {
     Pause,
     Resume,
     Stop,
-    Callback
 }
 
 impl StreamPlayerImpl {
@@ -88,6 +88,7 @@ impl StreamPlayerImpl {
 
 
         let (command_tx, command_rx) = mpsc::channel::<StreamCommand>();
+        let (callback_tx, callback_rx) = mpsc::channel::<Callback>();
 
         self.command_sender = Some(command_tx);
 
@@ -108,7 +109,7 @@ impl StreamPlayerImpl {
                 let nse = next_sample_callback.load(Relaxed);
                 let l =counter.load(Relaxed);
                 if nse!=0 && nse>l{
-                    cmd_sender.send(StreamCommand::Callback).unwrap();
+                    callback_tx.send(Callback(nse)).unwrap();
                     next_sample_callback.store(0,Relaxed);
                 }
 
@@ -135,7 +136,7 @@ impl StreamPlayerImpl {
         let mut streamer = self.streamer.take().expect("start() called twice");
         let str2 = &streamer;
         let handle = thread::spawn(move || {
-            if let Err(e) = streamer.play(sender).join().unwrap_or(Err(StreamErr::UnknownError)) {
+            if let Err(e) = streamer.play(sender, callback_rx).join().unwrap_or(Err(StreamErr::UnknownError)) {
                 eprintln!("playback error: {e:?}");
             }
             // sender dropped here → channel closes → consumer thread exits after drain
@@ -154,15 +155,6 @@ impl StreamPlayerImpl {
                 if command == StreamCommand::Resume {
                     _stream.play().unwrap_or_else(|_| eprintln!("resume failed"));
                     paused.store(false, Relaxed);
-                }
-                if command == StreamCommand::Callback {
-                    let nse = next_sample_callback.load(Relaxed);
-                    if nse == 0 {
-                        continue;
-                    }
-                   //str2.execute_callback(nse);
-                    // stream player doesn't execute the callback, it just passes it back to the stream,
-                    // and that propagates to the first callback with the mark
                 }
                 if command == StreamCommand::Stop {
                     break;
