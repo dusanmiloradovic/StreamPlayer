@@ -1,7 +1,8 @@
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{ SyncSender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use async_broadcast::Receiver;
 
 pub mod mixer;
 pub mod single;
@@ -29,7 +30,7 @@ pub trait Streamer: Send {
     fn play(
         &mut self,
         sender: SyncSender<Vec<f32>>,
-        callback_receiver: Receiver<Callback>,
+        callback_receiver:  Receiver<Callback>,
         callback_register: SyncSender<u64>,
     ) -> JoinHandle<Result<(), StreamErr>>;
     fn pause(&mut self) -> Result<(), StreamErr>;
@@ -42,8 +43,11 @@ pub trait Streamer: Send {
     fn get_output_sample_rate(&self) -> u32; // the output sample rate should match the closest supported sample rate, and the stream should be resampled to this rate.
     fn finished_flag(&self) -> Arc<AtomicBool>;
     fn add_callback(&mut self, callback_time: u64, callback: Box<dyn Fn() + Send>);
+    fn get_callback_receiver(&self) -> Option<Receiver<Callback>>;
+    fn get_callback_register(&self) -> Option<SyncSender<u64>>;
 }
 
+#[derive(Clone)]
 pub enum Callback {
-    Callback(u64),
+    CbOnSample(u64),
 }

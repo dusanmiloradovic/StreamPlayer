@@ -3,10 +3,11 @@ use crossbeam_channel::{bounded, select, Sender};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize};
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{ SyncSender};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
+use async_broadcast::Receiver;
 
 enum MixerCommand {
     Stop(usize),
@@ -33,6 +34,8 @@ pub struct Mixer {
     shared: Arc<Mutex<MixerShared>>,
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
     callback_register: Option<SyncSender<u64>>,
+    callback_receiver: Option<Receiver<Callback>>,
+    pending_callbacks: Vec<u64>,
 }
 
 struct MixerShared {
@@ -71,6 +74,8 @@ impl Mixer {
             })),
             callbacks: Arc::new(Mutex::new(HashMap::new())),
             callback_register: None,
+            callback_receiver: None,
+            pending_callbacks: Vec::new(),
         }
     }
 
@@ -114,9 +119,12 @@ impl Mixer {
         let shared_buf = Arc::new(Mutex::new(VecDeque::new()));
         let index = Arc::new(AtomicUsize::new(current_pos));
         let finished = streamer.finished_flag();
+        //
+        let callback_receiver = streamer.get_callback_receiver().unwrap();
+        let callback_register = streamer.get_callback_register().unwrap();
 
         let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-        streamer.play(inner_sender);
+        streamer.play(inner_sender,callback_receiver,callback_register);
         if auto_seek {
             //TODO need to get the current position of the player first, and then seek
         }
@@ -195,6 +203,12 @@ impl Streamer for Mixer {
         callback_receiver: Receiver<Callback>,
         callback_register: SyncSender<u64>,
     ) -> JoinHandle<Result<(), StreamErr>> {
+        self.pending_callbacks.iter().for_each(|callback_time| {
+            callback_register.send(*callback_time).unwrap();
+        });
+        let cbr = callback_register.clone();
+        self.callback_register = Some(callback_register);
+        self.callback_receiver = Some(callback_receiver.clone());
         let (sync_sender, sync_receiver) = bounded::<usize>(8);
         let (cmd_tx, cmd_rx) = bounded::<MixerCommand>(4);
         self.command_tx = Some(cmd_tx);
@@ -220,7 +234,7 @@ impl Streamer for Mixer {
             let finished = s.finished_flag();
 
             let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-            s.play(inner_sender);
+            s.play(inner_sender, callback_receiver.clone(), cbr.clone());
 
             let ix = index.clone();
             let sb = shared_buf.clone();
@@ -366,14 +380,23 @@ impl Streamer for Mixer {
     }
 
     fn add_callback(&mut self, callback_time: u64, callback: Box<dyn Fn() + Send>) {
-        self.callback_register
-            .as_ref()
-            .unwrap()
-            .send(callback_time)
-            .unwrap();
+        if let Some(cr) = &self.callback_register {
+            cr.send(callback_time).unwrap();
+        }else{
+            self.pending_callbacks.push(callback_time);
+        }
+
         self.callbacks
             .lock()
             .unwrap()
             .insert(callback_time, callback);
+    }
+
+    fn get_callback_receiver(&self) -> Option<Receiver<Callback>> {
+        self.callback_receiver.clone()
+    }
+
+    fn get_callback_register(&self) -> Option<SyncSender<u64>> {
+        self.callback_register.clone()
     }
 }

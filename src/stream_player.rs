@@ -1,4 +1,5 @@
-use audio_learn::streamer::Callback::Callback;
+use async_broadcast::broadcast;
+use audio_learn::streamer::Callback;
 use audio_learn::streamer::{StreamErr, Streamer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{default_host, StreamError, SupportedStreamConfig};
@@ -8,6 +9,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+use audio_learn::streamer::Callback::CbOnSample;
 
 pub struct StreamPlayerImpl {
     default_sample_rate: u32,
@@ -91,8 +93,8 @@ impl StreamPlayerImpl {
         let (mut producer, mut consumer) = HeapRb::<f32>::new(ring_size).split();
 
         let (command_tx, command_rx) = mpsc::channel::<StreamCommand>();
-        let (callback_tx, callback_rx) = mpsc::sync_channel::<Callback>(8);
         let (callback_register_tx, callback_register_rx) = mpsc::sync_channel::<u64>(8);
+        let (br_tx , mut br_rx) = broadcast::<Callback>(8);
         // we use channels in both directions, we need here to register the timings, and
         // the player is responsible for driving the streamers.
         // the streamers themselves are registering the callbacks
@@ -118,7 +120,7 @@ impl StreamPlayerImpl {
                 let nse = next_sample_callback.load(Relaxed);
                 let l = counter.load(Relaxed);
                 if nse != 0 && nse > l {
-                    callback_tx.send(Callback(nse)).unwrap();
+                    br_tx.try_broadcast(CbOnSample(nse)).ok();
                     next_sample_callback.store(0, Relaxed);
                 }
             }
@@ -155,7 +157,7 @@ impl StreamPlayerImpl {
         let mut streamer = self.streamer.take().expect("start() called twice");
         let handle = thread::spawn(move || {
             if let Err(e) = streamer
-                .play(sender, callback_rx, callback_register_tx)
+                .play(sender, br_rx.clone(), callback_register_tx)
                 .join()
                 .unwrap_or(Err(StreamErr::UnknownError))
             {
@@ -213,5 +215,5 @@ impl StreamPlayerImpl {
         let elapsed_ms = elapsed_samples as f32 / self.default_sample_rate as f32 * 1000.0;
         elapsed_ms
     }
-    
+
 }

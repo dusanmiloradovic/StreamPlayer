@@ -5,10 +5,11 @@ use cpal::traits::{DeviceTrait, HostTrait};
 use rubato::{Fft, FixedSync, Resampler};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{ SyncSender};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
+use async_broadcast::Receiver;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CodecParameters, DecoderOptions};
 use symphonia::core::errors::Error;
@@ -30,8 +31,6 @@ enum StreamerCommand {
 
 pub struct SingleStreamer {
     paused: Arc<AtomicBool>,
-    resampler: Option<Fft<f32>>,
-    resampling_buffer: Vec<f32>,
     input_sample_rate: u32,
     probe_result: Option<ProbeResult>,
     channels_size: u16,
@@ -43,6 +42,7 @@ pub struct SingleStreamer {
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
     callback_register: Option<SyncSender<u64>>,
     pending_callbacks: Vec<u64>,
+    callback_receiver: Option<Receiver<Callback>>,
 }
 
 // Free function to avoid borrow conflict between self.probe_result.format and other fields.
@@ -132,25 +132,9 @@ impl SingleStreamer {
             config_range.max_sample_rate(),
         );
         let config_sample_rate = config_range.with_sample_rate(closest).sample_rate();
-
-        let resampler = if config_sample_rate != sample_rate {
-            Fft::<f32>::new(
-                sample_rate as usize,
-                config_sample_rate as usize,
-                CHUNK_SIZE,
-                2,
-                track_channels_size as usize,
-                FixedSync::Input,
-            )
-            .ok()
-        } else {
-            None
-        };
-
+        
         Ok(Self {
             paused: Arc::new(AtomicBool::new(false)),
-            resampler,
-            resampling_buffer: Vec::new(),
             input_sample_rate: sample_rate,
             probe_result: Some(probed),
             channels_size: track_channels_size,
@@ -162,6 +146,7 @@ impl SingleStreamer {
             callbacks: Arc::new(Mutex::new(HashMap::new())),
             callback_register: None,
             pending_callbacks: Vec::new(),
+            callback_receiver: None,
         })
     }
 }
@@ -170,13 +155,14 @@ impl Streamer for SingleStreamer {
     fn play(
         &mut self,
         sender: SyncSender<Vec<f32>>,
-        callback_receiver: Receiver<Callback>,
+        mut callback_receiver: Receiver<Callback>,
         callback_register: SyncSender<u64>,
     ) -> JoinHandle<Result<(), StreamErr>> {
         self.pending_callbacks.iter().for_each(|callback_time| {
             callback_register.send(*callback_time).unwrap();
         });
         self.callback_register = Some(callback_register);
+        self.callback_receiver = Some(callback_receiver.clone());
 
 
         let codec_params = self.codec_params.clone();
@@ -235,7 +221,7 @@ impl Streamer for SingleStreamer {
                     Err(_) => {} // nothing pending, continue
                 }
                 match callback_receiver.try_recv() {
-                    Ok(Callback::Callback(callback_time)) => {
+                    Ok(Callback::CbOnSample(callback_time)) => {
                         execute_callback(&callbacks, callback_time);
                     }
                     Err(_) => {}
@@ -355,5 +341,13 @@ impl Streamer for SingleStreamer {
             .lock()
             .unwrap()
             .insert(callback_time, callback);
+    }
+
+    fn get_callback_receiver(&self) -> Option<Receiver<Callback>> {
+        todo!()
+    }
+
+    fn get_callback_register(&self) -> Option<SyncSender<u64>> {
+        todo!()
     }
 }

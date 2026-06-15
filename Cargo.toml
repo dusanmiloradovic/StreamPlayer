@@ -10,3 +10,4 @@ audioadapter-buffers = "2.0.0"
 ringbuf = "0.4.8"
 symphonia = {  version ="0.5.5", features = ["all"] }
 crossbeam-channel = "0.5.15"
+async-broadcast = "0.7.2"
