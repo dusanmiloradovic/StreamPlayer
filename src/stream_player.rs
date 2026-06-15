@@ -94,7 +94,7 @@ impl StreamPlayerImpl {
 
         let (command_tx, command_rx) = mpsc::channel::<StreamCommand>();
         let (callback_register_tx, callback_register_rx) = mpsc::sync_channel::<u64>(8);
-        let (br_tx , mut br_rx) = broadcast::<Callback>(8);
+        let (br_tx , br_rx) = broadcast::<Callback>(8);
         // we use channels in both directions, we need here to register the timings, and
         // the player is responsible for driving the streamers.
         // the streamers themselves are registering the callbacks

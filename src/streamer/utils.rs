@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex};
 
 pub fn execute_callback(
     callbacks: &Mutex<HashMap<u64, Box<dyn Fn() + Send>>>,
