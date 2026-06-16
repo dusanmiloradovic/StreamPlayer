@@ -23,6 +23,7 @@ fn main() {
     thread::sleep(Duration::from_secs(7));
     println!("added");
     mixer_handle.add(Box::new(streamer2), 100, true);
+   // streamer.add_callback(Default::default(), Box::new(|| println!("added")));
     handle.join().unwrap();
 
     // let file = File::open("./files/well-tempered-clavier-1.mp3").unwrap();

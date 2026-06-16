@@ -1,4 +1,4 @@
-use crate::streamer::{Callback, StreamErr, Streamer};
+use crate::streamer::{Callback, StreamErr, Streamer, StreamerCallbackHandle};
 use audioadapter_buffers::direct::InterleavedSlice;
 use cpal::default_host;
 use cpal::traits::{DeviceTrait, HostTrait};
@@ -41,8 +41,9 @@ pub struct SingleStreamer {
     command_tx: Option<SyncSender<StreamerCommand>>,
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
     callback_register: Option<SyncSender<u64>>,
-    pending_callbacks: Vec<u64>,
+    pending_callbacks: Arc<Mutex<Vec<u64>>>,
     callback_receiver: Option<Receiver<Callback>>,
+    callback_handle: Arc<Mutex<StreamerCallbackHandle>>,
 }
 
 // Free function to avoid borrow conflict between self.probe_result.format and other fields.
@@ -145,8 +146,14 @@ impl SingleStreamer {
             command_tx: None,
             callbacks: Arc::new(Mutex::new(HashMap::new())),
             callback_register: None,
-            pending_callbacks: Vec::new(),
+            pending_callbacks: Arc::new(Mutex::new(Vec::new())),
             callback_receiver: None,
+            callback_handle: Arc::new(Mutex::new(StreamerCallbackHandle{
+                sample_rate,
+                channel_count: track_channels_size as u32,
+                callback_register: None,
+                pending_callbacks: Arc::new(Mutex::new(vec![])),
+            }))
         })
     }
 }
@@ -158,11 +165,15 @@ impl Streamer for SingleStreamer {
         mut callback_receiver: Receiver<Callback>,
         callback_register: SyncSender<u64>,
     ) -> JoinHandle<Result<(), StreamErr>> {
-        self.pending_callbacks.iter().for_each(|callback_time| {
+        self.pending_callbacks.lock().unwrap().iter().for_each(|callback_time| {
             callback_register.send(*callback_time).unwrap();
         });
-        self.callback_register = Some(callback_register);
+        self.callback_register = Some(callback_register.clone());
         self.callback_receiver = Some(callback_receiver.clone());
+        {
+            let mut h = self.callback_handle.lock().unwrap();
+            h.callback_register = Some(callback_register.clone());
+        }
 
 
         let codec_params = self.codec_params.clone();
@@ -327,27 +338,23 @@ impl Streamer for SingleStreamer {
         self.finished.clone()
     }
 
-    fn add_callback(&mut self, callback_time: u64, callback: Box<dyn Fn() + Send>) {
-        // TODO if the callback is added before the play the below code will panic
-        // register the callback times somewhere in that case
-        // and send them on play
-        if let Some(cr) = &self.callback_register {
-            cr.send(callback_time).unwrap();
-        }else{
-            self.pending_callbacks.push(callback_time);
-        }
-
-        self.callbacks
-            .lock()
-            .unwrap()
-            .insert(callback_time, callback);
-    }
-
     fn get_callback_receiver(&self) -> Option<Receiver<Callback>> {
         self.callback_receiver.clone()
     }
 
     fn get_callback_register(&self) -> Option<SyncSender<u64>> {
         self.callback_register.clone()
+    }
+
+    fn callback_register(&self) -> &Option<SyncSender<u64>> {
+        &self.callback_register
+    }
+
+    fn callbacks(&self) -> &Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>> {
+        &self.callbacks
+    }
+
+    fn get_callback_handle(&self) -> Arc<Mutex<StreamerCallbackHandle>> {
+        todo!()
     }
 }

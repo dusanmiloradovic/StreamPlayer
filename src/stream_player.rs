@@ -1,5 +1,6 @@
 use async_broadcast::broadcast;
 use audio_learn::streamer::Callback;
+use audio_learn::streamer::Callback::CbOnSample;
 use audio_learn::streamer::{StreamErr, Streamer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{default_host, StreamError, SupportedStreamConfig};
@@ -9,7 +10,6 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use audio_learn::streamer::Callback::CbOnSample;
 
 pub struct StreamPlayerImpl {
     default_sample_rate: u32,
@@ -94,7 +94,7 @@ impl StreamPlayerImpl {
 
         let (command_tx, command_rx) = mpsc::channel::<StreamCommand>();
         let (callback_register_tx, callback_register_rx) = mpsc::sync_channel::<u64>(8);
-        let (br_tx , br_rx) = broadcast::<Callback>(8);
+        let (br_tx, br_rx) = broadcast::<Callback>(8);
         // we use channels in both directions, we need here to register the timings, and
         // the player is responsible for driving the streamers.
         // the streamers themselves are registering the callbacks
@@ -135,7 +135,7 @@ impl StreamPlayerImpl {
                 let nse = nse2.load(Relaxed);
                 if nse == 0 {
                     nse2.store(callback, Relaxed);
-                }else{
+                } else {
                     sample_callbacks.lock().unwrap().push_back(callback);
                 }
             }
@@ -212,8 +212,9 @@ impl StreamPlayerImpl {
 
     pub fn get_play_time_ms(&self) -> f32 {
         let elapsed_samples = self.elapsed_samples.load(Relaxed);
-        let elapsed_ms = elapsed_samples as f32 / self.default_sample_rate as f32 * 1000.0;
+        let elapsed_ms = elapsed_samples as f32
+            / (self.default_sample_rate as f32 * self.channels as f32)
+            * 1000.0;
         elapsed_ms
     }
-
 }
