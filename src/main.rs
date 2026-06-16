@@ -20,7 +20,7 @@ fn main() {
     let handle = player.start().unwrap();
     let file = File::open("./files/well-tempered-clavier-1.mp3").unwrap();
     let streamer2 = SingleStreamer::new(Box::new(file), "audio/mpeg".to_string()).unwrap();
-    thread::sleep(Duration::from_secs(20));
+    thread::sleep(Duration::from_secs(7));
     println!("added");
     mixer_handle.add(Box::new(streamer2), 100, true);
     handle.join().unwrap();

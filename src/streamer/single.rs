@@ -132,7 +132,7 @@ impl SingleStreamer {
             config_range.max_sample_rate(),
         );
         let config_sample_rate = config_range.with_sample_rate(closest).sample_rate();
-        
+
         Ok(Self {
             paused: Arc::new(AtomicBool::new(false)),
             input_sample_rate: sample_rate,
@@ -344,10 +344,10 @@ impl Streamer for SingleStreamer {
     }
 
     fn get_callback_receiver(&self) -> Option<Receiver<Callback>> {
-        todo!()
+        self.callback_receiver.clone()
     }
 
     fn get_callback_register(&self) -> Option<SyncSender<u64>> {
-        todo!()
+        self.callback_register.clone()
     }
 }

@@ -33,14 +33,16 @@ pub struct Mixer {
     // Shared state so MixerHandle can access channels after Mixer is moved.
     shared: Arc<Mutex<MixerShared>>,
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
+    pending_callbacks: Vec<u64>,
     callback_register: Option<SyncSender<u64>>,
     callback_receiver: Option<Receiver<Callback>>,
-    pending_callbacks: Vec<u64>,
 }
 
 struct MixerShared {
     command_tx: Option<Sender<MixerCommand>>,
     sync_sender: Option<Sender<usize>>,
+    callback_register: Option<SyncSender<u64>>,
+    callback_receiver: Option<Receiver<Callback>>,
 }
 
 /// A handle to a `Mixer` that can be retained by the caller after the `Mixer`
@@ -71,11 +73,13 @@ impl Mixer {
             shared: Arc::new(Mutex::new(MixerShared {
                 command_tx: None,
                 sync_sender: None,
+                callback_register: None,
+                callback_receiver: None,
             })),
             callbacks: Arc::new(Mutex::new(HashMap::new())),
+            pending_callbacks: Vec::new(),
             callback_register: None,
             callback_receiver: None,
-            pending_callbacks: Vec::new(),
         }
     }
 
@@ -92,6 +96,8 @@ impl Mixer {
         let weight_arc = Arc::new(AtomicU32::new(weight));
 
         if let Some(cmd_tx) = &self.command_tx {
+            let callback_register = self.shared.lock().unwrap().callback_register.as_ref().unwrap().clone();
+            let callback_receiver = self.shared.lock().unwrap().callback_receiver.as_ref().unwrap().clone();
             Self::add_live(
                 cmd_tx,
                 self.sync_sender.as_ref().unwrap(),
@@ -99,6 +105,8 @@ impl Mixer {
                 streamer,
                 weight_arc.clone(),
                 auto_seek,
+                callback_register,
+                callback_receiver,
             );
             self.weights.push(weight_arc);
         } else {
@@ -114,14 +122,15 @@ impl Mixer {
         mut streamer: Box<dyn Streamer>,
         weight_arc: Arc<AtomicU32>,
         auto_seek: bool,
+        callback_register: SyncSender<u64>,
+        callback_receiver: Receiver<Callback>,
     ) {
         let current_pos = play_position.load(Relaxed);
         let shared_buf = Arc::new(Mutex::new(VecDeque::new()));
         let index = Arc::new(AtomicUsize::new(current_pos));
         let finished = streamer.finished_flag();
         //
-        let callback_receiver = streamer.get_callback_receiver().unwrap();
-        let callback_register = streamer.get_callback_register().unwrap();
+
 
         let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
         streamer.play(inner_sender,callback_receiver,callback_register);
@@ -175,7 +184,12 @@ impl Mixer {
 impl MixerHandle {
     pub fn add(&self, streamer: Box<dyn Streamer>, weight: u32, auto_seek: bool) {
         let shared = self.shared.lock().unwrap();
-        if let (Some(cmd_tx), Some(sync_sender)) = (&shared.command_tx, &shared.sync_sender) {
+        if let (Some(cmd_tx), Some(sync_sender), Some(callback_register), Some(callback_receiver)) = (
+            &shared.command_tx,
+            &shared.sync_sender,
+            &shared.callback_register,
+            &shared.callback_receiver,
+        ) {
             let weight_arc = Arc::new(AtomicU32::new(weight));
             Mixer::add_live(
                 cmd_tx,
@@ -184,6 +198,8 @@ impl MixerHandle {
                 streamer,
                 weight_arc,
                 auto_seek,
+                callback_register.clone(),
+                callback_receiver.clone(),
             );
         }
     }
@@ -219,6 +235,8 @@ impl Streamer for Mixer {
             let mut shared = self.shared.lock().unwrap();
             shared.command_tx = self.command_tx.clone();
             shared.sync_sender = self.sync_sender.clone();
+            shared.callback_register = self.callback_register.clone();
+            shared.callback_receiver = self.callback_receiver.clone();
         }
 
         // These Vecs are owned exclusively by the mixing thread. The Add command
