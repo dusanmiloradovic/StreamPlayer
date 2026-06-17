@@ -119,8 +119,7 @@ impl StreamPlayerImpl {
                 push_with_backpressure(&mut producer, &samples);
                 let nse = next_sample_callback.load(Relaxed);
                 let l = counter.load(Relaxed);
-                if nse != 0 && l > nse {
-                    println!("*************nse: {}, l: {}", nse, l);
+                if nse != 0 && l >= nse {
                     br_tx.try_broadcast(CbOnSample(nse)).ok();
                     next_sample_callback.store(0, Relaxed);
                 }

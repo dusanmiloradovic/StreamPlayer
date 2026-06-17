@@ -165,7 +165,6 @@ impl Streamer for SingleStreamer {
         mut callback_receiver: Receiver<Callback>,
         callback_register: SyncSender<u64>,
     ) -> JoinHandle<Result<(), StreamErr>> {
-        
         self.callback_receiver = Some(callback_receiver.clone());
         {
             let mut h = self.callback_handle.lock().unwrap();

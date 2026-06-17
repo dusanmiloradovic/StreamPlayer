@@ -1,4 +1,5 @@
 use crate::streamer::{Callback, StreamErr, Streamer, StreamerCallBackHandle, StreamerCallbackShared};
+use crate::streamer::utils::execute_callback;
 use crossbeam_channel::{bounded, select, Sender};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
@@ -294,11 +295,22 @@ impl Streamer for Mixer {
         let finished = self.finished.clone();
         let stopped = self.stopped.clone();
         let play_position = self.play_position.clone();
+        let callbacks = self.callbacks.clone();
+        let mut callback_receiver = callback_receiver;
 
         thread::spawn(move || -> Result<(), StreamErr> {
             let mut prev_index = 0usize;
 
             loop {
+                // Mixer-level callbacks: the broadcast is also forwarded to the
+                // child streamers, so both levels get a chance to handle it.
+                match callback_receiver.try_recv() {
+                    Ok(Callback::CbOnSample(callback_time)) => {
+                        execute_callback(&callbacks, callback_time);
+                    }
+                    Err(_) => {}
+                }
+
                 select! {
                     recv(sync_receiver) -> _ => {
                         if stopped.load(Acquire) {
