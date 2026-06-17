@@ -28,20 +28,27 @@ pub enum StreamErr {
     NotPlaying,
 }
 
-pub struct StreamerCallbackHandle{
+pub struct StreamerCallbackShared {
     sample_rate:u32,
     channel_count:u32,
     callback_register:Option<SyncSender<u64>>,
     pending_callbacks:Arc<Mutex<Vec<u64>>>,
+    callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
 }
 
-impl StreamerCallbackHandle {
+pub struct StreamerCallBackHandle{
+    shared:Arc<Mutex<StreamerCallbackShared>>,
+}
 
-    fn add_callback(&self, after: Duration, callback: Box<dyn Fn() + Send>) {
+impl StreamerCallbackShared {
+
+    pub fn add_callback(&self, after: Duration, callback: Box<dyn Fn() + Send>) {
         let secs = after.as_secs();
         let samples =
             secs * self.sample_rate as u64 * self.channel_count as u64;
         let mut pending_callbacks = self.pending_callbacks.lock().unwrap();
+        let mut callbacks = self.callbacks.lock().unwrap();
+        callbacks.insert(samples, callback);
         match &self.callback_register{
             None=>{
                 pending_callbacks.push(samples);
@@ -50,6 +57,12 @@ impl StreamerCallbackHandle {
                 cr.send(samples).unwrap();
             }
         }
+    }
+}
+
+impl StreamerCallBackHandle {
+    pub fn add_callback(&self, after: Duration, callback: Box<dyn Fn() + Send>) {
+        self.shared.lock().unwrap().add_callback(after, callback);
     }
 }
 
@@ -69,13 +82,7 @@ pub trait Streamer: Send {
     fn get_input_channel_count(&self) -> u16;
     fn get_output_sample_rate(&self) -> u32; // the output sample rate should match the closest supported sample rate, and the stream should be resampled to this rate.
     fn finished_flag(&self) -> Arc<AtomicBool>;
-    fn get_callback_receiver(&self) -> Option<Receiver<Callback>>;
-    fn get_callback_register(&self) -> Option<SyncSender<u64>>;
-
-    fn callback_register(&self) -> &Option<SyncSender<u64>>;
-    fn callbacks(&self) -> &Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>;
-    fn get_callback_handle(&self) -> Arc<Mutex<StreamerCallbackHandle>>;
-    
+    fn get_callback_handle(&self) -> StreamerCallBackHandle;
 }
 
 #[derive(Clone)]

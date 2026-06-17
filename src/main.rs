@@ -16,6 +16,9 @@ fn main() {
     let weights: Vec<u32> = vec![95, 5];
     let mixer = Mixer::new(streamers,weights);
     let mixer_handle = mixer.handle();
+    let callback_handle = mixer.get_callback_handle();
+    callback_handle.add_callback(Duration::from_secs(2), Box::new(|| println!("YOYOYO")));
+
     let mut player = stream_player::new_stream_player(Box::new(mixer)).unwrap();
     let handle = player.start().unwrap();
     let file = File::open("./files/well-tempered-clavier-1.mp3").unwrap();
@@ -25,6 +28,7 @@ fn main() {
     mixer_handle.add(Box::new(streamer2), 100, true);
    // streamer.add_callback(Default::default(), Box::new(|| println!("added")));
     handle.join().unwrap();
+
 
     // let file = File::open("./files/well-tempered-clavier-1.mp3").unwrap();
     // let streamer = SingleStreamer::new(Box::new(file), "audio/mpeg".to_string()).unwrap();

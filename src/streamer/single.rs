@@ -1,15 +1,17 @@
-use crate::streamer::{Callback, StreamErr, Streamer, StreamerCallbackHandle};
+use crate::streamer::{
+    Callback, StreamErr, Streamer, StreamerCallBackHandle, StreamerCallbackShared,
+};
+use async_broadcast::Receiver;
 use audioadapter_buffers::direct::InterleavedSlice;
 use cpal::default_host;
 use cpal::traits::{DeviceTrait, HostTrait};
 use rubato::{Fft, FixedSync, Resampler};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{ SyncSender};
+use std::sync::mpsc::SyncSender;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
-use async_broadcast::Receiver;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CodecParameters, DecoderOptions};
 use symphonia::core::errors::Error;
@@ -39,11 +41,9 @@ pub struct SingleStreamer {
     output_sample_rate: u32,
     finished: Arc<AtomicBool>,
     command_tx: Option<SyncSender<StreamerCommand>>,
-    callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
-    callback_register: Option<SyncSender<u64>>,
-    pending_callbacks: Arc<Mutex<Vec<u64>>>,
     callback_receiver: Option<Receiver<Callback>>,
-    callback_handle: Arc<Mutex<StreamerCallbackHandle>>,
+    callback_handle: Arc<Mutex<StreamerCallbackShared>>,
+    callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
 }
 
 // Free function to avoid borrow conflict between self.probe_result.format and other fields.
@@ -134,6 +134,7 @@ impl SingleStreamer {
         );
         let config_sample_rate = config_range.with_sample_rate(closest).sample_rate();
 
+        let callbacks = Arc::new(Mutex::new(HashMap::new()));
         Ok(Self {
             paused: Arc::new(AtomicBool::new(false)),
             input_sample_rate: sample_rate,
@@ -144,16 +145,15 @@ impl SingleStreamer {
             output_sample_rate: config_sample_rate,
             finished: Arc::new(AtomicBool::new(false)),
             command_tx: None,
-            callbacks: Arc::new(Mutex::new(HashMap::new())),
-            callback_register: None,
-            pending_callbacks: Arc::new(Mutex::new(Vec::new())),
             callback_receiver: None,
-            callback_handle: Arc::new(Mutex::new(StreamerCallbackHandle{
+            callbacks: callbacks.clone(),
+            callback_handle: Arc::new(Mutex::new(StreamerCallbackShared {
                 sample_rate,
                 channel_count: track_channels_size as u32,
                 callback_register: None,
                 pending_callbacks: Arc::new(Mutex::new(vec![])),
-            }))
+                callbacks: callbacks.clone(),
+            })),
         })
     }
 }
@@ -165,16 +165,16 @@ impl Streamer for SingleStreamer {
         mut callback_receiver: Receiver<Callback>,
         callback_register: SyncSender<u64>,
     ) -> JoinHandle<Result<(), StreamErr>> {
-        self.pending_callbacks.lock().unwrap().iter().for_each(|callback_time| {
-            callback_register.send(*callback_time).unwrap();
-        });
-        self.callback_register = Some(callback_register.clone());
+        
         self.callback_receiver = Some(callback_receiver.clone());
         {
             let mut h = self.callback_handle.lock().unwrap();
             h.callback_register = Some(callback_register.clone());
+            let pending_callbacks = h.pending_callbacks.lock().unwrap();
+            pending_callbacks.iter().for_each(|callback_time| {
+                callback_register.send(*callback_time).unwrap();
+            });
         }
-
 
         let codec_params = self.codec_params.clone();
         let track_id = self.track_id;
@@ -338,23 +338,11 @@ impl Streamer for SingleStreamer {
         self.finished.clone()
     }
 
-    fn get_callback_receiver(&self) -> Option<Receiver<Callback>> {
-        self.callback_receiver.clone()
-    }
+  
 
-    fn get_callback_register(&self) -> Option<SyncSender<u64>> {
-        self.callback_register.clone()
-    }
-
-    fn callback_register(&self) -> &Option<SyncSender<u64>> {
-        &self.callback_register
-    }
-
-    fn callbacks(&self) -> &Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>> {
-        &self.callbacks
-    }
-
-    fn get_callback_handle(&self) -> Arc<Mutex<StreamerCallbackHandle>> {
-        todo!()
+    fn get_callback_handle(&self) -> StreamerCallBackHandle {
+        StreamerCallBackHandle {
+            shared: self.callback_handle.clone(),
+        }
     }
 }
