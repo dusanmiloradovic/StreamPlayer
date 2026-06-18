@@ -13,6 +13,7 @@ fn main() {
     let f2 = File::open("./files/lost_in_the_city.mp3").unwrap();
     let s2 = SingleStreamer::new(Box::new(f2), "audio/mpeg".to_string()).unwrap();
     let s2_callback_handle = &s2.get_callback_handle();
+    let s1_callback_handle = &streamer.get_callback_handle();
     let streamers:Vec<Box<dyn Streamer>> = vec![Box::new(streamer),Box::new(s2)];
     let weights: Vec<u32> = vec![95, 5];
     let mixer = Mixer::new(streamers,weights);
@@ -22,6 +23,7 @@ fn main() {
 
     callback_handle.add_callback(Duration::from_secs(2), Box::new(|| println!("YOYOYO")));
     s2_callback_handle.add_callback(Duration::from_secs(11), Box::new(|| println!("NOOOOO")));
+    s1_callback_handle.add_callback(Duration::from_secs(1), Box::new(|| println!("S1 :)")));
     let mut player = stream_player::new_stream_player(Box::new(mixer)).unwrap();
     let handle = player.start().unwrap();
     let file = File::open("./files/well-tempered-clavier-1.mp3").unwrap();
