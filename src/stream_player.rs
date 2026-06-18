@@ -141,7 +141,7 @@ impl StreamPlayerImpl {
             while let Ok(callback) = callback_register_rx.recv() {
                 let elapsed_samples = counter.load(Relaxed);
                 if callback < elapsed_samples {
-                    return;
+                    continue;
                 }
                 let nse = nse2.load(Relaxed);
                 if nse == 0 {
@@ -150,7 +150,7 @@ impl StreamPlayerImpl {
                     if callback < nse {
                         nse2.store(callback, Relaxed);
                         sample_callbacks.lock().unwrap().insert(nse);
-                        return;
+                        continue;
                     }
                     sample_callbacks.lock().unwrap().insert(callback);
                 }

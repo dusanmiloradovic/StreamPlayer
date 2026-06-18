@@ -171,7 +171,7 @@ impl Streamer for SingleStreamer {
             h.callback_register = Some(callback_register.clone());
             let pending_callbacks = h.pending_callbacks.lock().unwrap();
             pending_callbacks.iter().for_each(|callback_time| {
-                callback_register.send(*callback_time).unwrap();
+                callback_register.send(*callback_time).unwrap_or_else(move |err| println!("err: {}", err));
             });
         }
 
