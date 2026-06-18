@@ -201,7 +201,6 @@ impl Mixer {
 impl MixerHandle {
     pub fn add(&self, streamer: Box<dyn Streamer>, weight: u32, auto_seek: bool) {
         let shared = self.shared.lock().unwrap();
-        let cbh = self.callback_shared.lock().unwrap();
         if let (Some(cmd_tx), Some(sync_sender), Some(callback_register), Some(callback_receiver)) = (
             &shared.command_tx,
             &shared.sync_sender,
@@ -251,6 +250,8 @@ impl Streamer for Mixer {
             let mut shared = self.shared.lock().unwrap();
             shared.command_tx = self.command_tx.clone();
             shared.sync_sender = self.sync_sender.clone();
+            shared.callback_register = Some(callback_register.clone());
+            shared.callback_receiver = Some(callback_receiver.clone());
 
             let mut callback_handle = self.callback_handle.lock().unwrap();
             callback_handle.callback_register = Some(callback_register.clone());

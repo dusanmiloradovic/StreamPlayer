@@ -7,6 +7,6 @@ pub fn execute_callback(
 ) {
     match callbacks.lock().unwrap().get(&callback_time) {
         Some(cb) => cb(),
-        None => println!("Callback not found {}",callback_time),
+        None => {},
     }
 }
