@@ -21,9 +21,9 @@ fn main() {
     let callback_handle = mixer.get_callback_handle();
 
 
-    callback_handle.add_callback(Duration::from_secs(2), Box::new(|| println!("YOYOYO")));
-    s2_callback_handle.add_callback(Duration::from_secs(11), Box::new(|| println!("NOOOOO")));
-    s1_callback_handle.add_callback(Duration::from_secs(1), Box::new(|| println!("S1 :)")));
+    callback_handle.add_callback(Duration::from_millis(1001), Box::new(|| println!("YOYOYO"))).unwrap_or_else(|e| println!("Error adding callback: {:?}", e));
+    s2_callback_handle.add_callback(Duration::from_secs(11), Box::new(|| println!("NOOOOO"))).unwrap_or_else(|e| println!("Error adding callback: {:?}", e));;
+    s1_callback_handle.add_callback(Duration::from_secs(1), Box::new(|| println!("S1 :)"))).unwrap_or_else(|e| println!("Error adding callback: {:?}", e));;
     let mut player = stream_player::new_stream_player(Box::new(mixer)).unwrap();
     let handle = player.start().unwrap();
     let file = File::open("./files/well-tempered-clavier-1.mp3").unwrap();

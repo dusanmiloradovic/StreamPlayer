@@ -121,7 +121,6 @@ impl StreamPlayerImpl {
                 let l = counter.load(Relaxed);
                 if nse != 0 && l >= nse {
                     br_tx.try_broadcast(CbOnSample(nse)).ok();
-                    println!("Sample callbacks {:?}",sample_callbacks.lock().unwrap());
                     let b =sample_callbacks.lock().unwrap().pop_first();
                     if let Some(v)=b{
                         next_sample_callback.store(v, Relaxed);
@@ -140,19 +139,20 @@ impl StreamPlayerImpl {
         let sample_callbacks = self.sample_callbacks.clone();
         thread::spawn(move || {
             while let Ok(callback) = callback_register_rx.recv() {
-                println!("Registering sample callback {}", callback);
                 let elapsed_samples = counter.load(Relaxed);
                 if callback < elapsed_samples {
-                    println!("Sample callback too late {},{}", callback, elapsed_samples);
                     return;
                 }
                 let nse = nse2.load(Relaxed);
                 if nse == 0 {
-                    println!("next sample callback was empty, storing");
                     nse2.store(callback, Relaxed);
                 } else {
+                    if callback < nse {
+                        nse2.store(callback, Relaxed);
+                        sample_callbacks.lock().unwrap().insert(nse);
+                        return;
+                    }
                     sample_callbacks.lock().unwrap().insert(callback);
-                    println!("next sample callback was not empty, inserting ,{:?}", sample_callbacks.lock().unwrap());
                 }
             }
         });

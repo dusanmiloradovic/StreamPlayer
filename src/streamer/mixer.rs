@@ -66,6 +66,12 @@ impl Mixer {
             .map(|x| Arc::new(AtomicU32::new(x)))
             .collect();
         let callbacks = Arc::new(Mutex::new(HashMap::new()));
+        // Mirror SingleStreamer: seed the callback handle with real sample_rate /
+        // channel_count at construction time so add_callback computes a correct
+        // sample key even before play() runs. Fall back to 0 for an empty mixer;
+        // play() patches the real values in once streamers exist.
+        let sample_rate = streamers.first().map_or(0, |s| s.get_input_sample_rate());
+        let channel_count = streamers.first().map_or(0, |s| s.get_input_channel_count() as u32);
         Self {
             streamers,
             weights,
@@ -83,8 +89,8 @@ impl Mixer {
             callbacks: callbacks.clone(),
             callback_receiver: None,
             callback_handle: Arc::new(Mutex::new(StreamerCallbackShared {
-                sample_rate: 0,
-                channel_count: 0,
+                sample_rate,
+                channel_count,
                 callback_register: None,
                 pending_callbacks: Arc::new(Mutex::new(vec![])),
                 callbacks: callbacks.clone(),

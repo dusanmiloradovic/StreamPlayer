@@ -36,16 +36,24 @@ pub struct StreamerCallbackShared {
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
 }
 
+#[derive(Debug)]
+pub enum StreamerAddError{
+    NoSampleRate,
+}
+
 pub struct StreamerCallBackHandle{
     shared:Arc<Mutex<StreamerCallbackShared>>,
 }
 
 impl StreamerCallbackShared {
 
-    pub fn add_callback(&self, after: Duration, callback: Box<dyn Fn() + Send>) {
+    pub fn add_callback(&self, after: Duration, callback: Box<dyn Fn() + Send>) -> Result<(), StreamerAddError>{
         let secs = after.as_secs();
         let samples =
             secs * self.sample_rate as u64 * self.channel_count as u64;
+        if samples == 0{
+            return Err(StreamerAddError::NoSampleRate);
+        }
         let mut pending_callbacks = self.pending_callbacks.lock().unwrap();
         let mut callbacks = self.callbacks.lock().unwrap();
         callbacks.insert(samples, callback);
@@ -57,12 +65,13 @@ impl StreamerCallbackShared {
                 cr.send(samples).unwrap();
             }
         }
+        return Ok(());
     }
 }
 
 impl StreamerCallBackHandle {
-    pub fn add_callback(&self, after: Duration, callback: Box<dyn Fn() + Send>) {
-        self.shared.lock().unwrap().add_callback(after, callback);
+    pub fn add_callback(&self, after: Duration, callback: Box<dyn Fn() + Send>) -> Result<(), StreamerAddError>{
+        self.shared.lock().unwrap().add_callback(after, callback)
     }
 }
 
