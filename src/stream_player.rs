@@ -5,7 +5,7 @@ use audio_learn::streamer::{StreamErr, Streamer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{default_host, StreamError, SupportedStreamConfig};
 use ringbuf::{traits::*, HeapRb};
-use std::collections::VecDeque;
+use std::collections::BTreeSet;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{mpsc, Arc, Mutex};
@@ -20,7 +20,7 @@ pub struct StreamPlayerImpl {
     command_sender: Option<mpsc::Sender<StreamCommand>>,
     elapsed_samples: Arc<AtomicU64>,
     next_sample_callback: Arc<AtomicU64>,
-    sample_callbacks: Arc<Mutex<VecDeque<u64>>>,
+    sample_callbacks: Arc<Mutex<BTreeSet<u64>>>,
 }
 
 pub fn new_stream_player(
@@ -78,7 +78,7 @@ impl StreamPlayerImpl {
             command_sender: None,
             elapsed_samples: Arc::new(AtomicU64::new(0)),
             next_sample_callback: Arc::new(AtomicU64::new(0)),
-            sample_callbacks: Arc::new(Mutex::new(VecDeque::new())),
+            sample_callbacks: Arc::new(Mutex::new(BTreeSet::new())),
         })
     }
 
@@ -121,7 +121,12 @@ impl StreamPlayerImpl {
                 let l = counter.load(Relaxed);
                 if nse != 0 && l >= nse {
                     br_tx.try_broadcast(CbOnSample(nse)).ok();
-                    next_sample_callback.store(0, Relaxed);
+                    let b =sample_callbacks.lock().unwrap().pop_first();
+                    if let Some(v)=b{
+                        next_sample_callback.store(v, Relaxed);
+                    }else {
+                        next_sample_callback.store(0, Relaxed);
+                    }
                 }
             }
             let drain_time =
@@ -130,13 +135,19 @@ impl StreamPlayerImpl {
             cmd_sender.send(StreamCommand::Stop).unwrap();
         });
 
+        let counter = self.elapsed_samples.clone();
+        let sample_callbacks = self.sample_callbacks.clone();
         thread::spawn(move || {
             while let Ok(callback) = callback_register_rx.recv() {
+                let elapsed_samples = counter.load(Relaxed);
+                if callback < elapsed_samples {
+                    return;
+                }
                 let nse = nse2.load(Relaxed);
                 if nse == 0 {
                     nse2.store(callback, Relaxed);
                 } else {
-                    sample_callbacks.lock().unwrap().push_back(callback);
+                    sample_callbacks.lock().unwrap().insert(callback);
                 }
             }
         });
