@@ -1,5 +1,6 @@
 use crate::streamer::{
-    Callback, StreamErr, Streamer, StreamerCallBackHandle, StreamerCallbackShared,
+    Callback, ControlCommand, ControlHandle, StreamErr, Streamer, StreamerCallBackHandle,
+    StreamerCallbackShared,
 };
 use async_broadcast::Receiver;
 use audioadapter_buffers::direct::InterleavedSlice;
@@ -9,7 +10,7 @@ use rubato::{Fft, FixedSync, Resampler};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::SyncSender;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use symphonia::core::audio::SampleBuffer;
@@ -25,14 +26,7 @@ use symphonia::core::units::Time;
 
 const CHUNK_SIZE: usize = 1024;
 
-enum StreamerCommand {
-    Seek(SeekTo),
-    Stop,
-    Rewind,
-}
-
 pub struct SingleStreamer {
-    paused: Arc<AtomicBool>,
     input_sample_rate: u32,
     probe_result: Option<ProbeResult>,
     channels_size: u16,
@@ -40,7 +34,9 @@ pub struct SingleStreamer {
     codec_params: CodecParameters,
     output_sample_rate: u32,
     finished: Arc<AtomicBool>,
-    command_tx: Option<SyncSender<StreamerCommand>>,
+    duration: Option<u64>,
+    control: ControlHandle,
+    command_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
     callback_receiver: Option<Receiver<Callback>>,
     callback_handle: Arc<Mutex<StreamerCallbackShared>>,
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
@@ -133,10 +129,17 @@ impl SingleStreamer {
             config_range.max_sample_rate(),
         );
         let config_sample_rate = config_range.with_sample_rate(closest).sample_rate();
+        let time_base = codec_params.time_base;
+        let mut duration = None;
+        if let Some(tb) = time_base {
+            let t = tb.calc_time(3);
+            let d: u64 = t.seconds * 1000 + (t.frac * 1000f64) as u64;
+            duration = Some(d);
+        }
 
         let callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let (control, command_rx) = ControlHandle::new();
         Ok(Self {
-            paused: Arc::new(AtomicBool::new(false)),
             input_sample_rate: sample_rate,
             probe_result: Some(probed),
             channels_size: track_channels_size,
@@ -144,7 +147,8 @@ impl SingleStreamer {
             codec_params,
             output_sample_rate: config_sample_rate,
             finished: Arc::new(AtomicBool::new(false)),
-            command_tx: None,
+            control,
+            command_rx: Some(command_rx),
             callback_receiver: None,
             callbacks: callbacks.clone(),
             callback_handle: Arc::new(Mutex::new(StreamerCallbackShared {
@@ -154,6 +158,7 @@ impl SingleStreamer {
                 pending_callbacks: Arc::new(Mutex::new(vec![])),
                 callbacks: callbacks.clone(),
             })),
+            duration,
         })
     }
 }
@@ -171,7 +176,9 @@ impl Streamer for SingleStreamer {
             h.callback_register = Some(callback_register.clone());
             let pending_callbacks = h.pending_callbacks.lock().unwrap();
             pending_callbacks.iter().for_each(|callback_time| {
-                callback_register.send(*callback_time).unwrap_or_else(move |err| println!("err: {}", err));
+                callback_register
+                    .send(*callback_time)
+                    .unwrap_or_else(move |err| println!("err: {}", err));
             });
         }
 
@@ -193,14 +200,14 @@ impl Streamer for SingleStreamer {
             None
         };
 
-        let (cmd_tx, cmd_rx) = mpsc::sync_channel::<StreamerCommand>(4);
-        self.command_tx = Some(cmd_tx);
+        let cmd_rx = self.command_rx.take();
 
         let finished = self.finished.clone();
-        let paused = self.paused.clone();
+        let paused = self.control.paused_flag();
 
         let callbacks = self.callbacks.clone();
         thread::spawn(move || -> Result<(), StreamErr> {
+            let cmd_rx = cmd_rx.ok_or(StreamErr::AlreadyPlaying)?;
             let mut format = format.ok_or(StreamErr::AlreadyPlaying)?;
             let mut resampler = resampler;
             let mut resampling_buffer: Vec<f32> = Vec::new();
@@ -214,15 +221,19 @@ impl Streamer for SingleStreamer {
                     thread::sleep(std::time::Duration::from_millis(10));
                 }
                 match cmd_rx.try_recv() {
-                    Ok(StreamerCommand::Seek(to)) => {
+                    Ok(ControlCommand::Seek(time)) => {
+                        let to = SeekTo::Time {
+                            time: Time::from(time),
+                            track_id: None,
+                        };
                         format.seek(SeekMode::Accurate, to).ok();
                         decoder.reset(); // mandatory after seek
                     }
-                    Ok(StreamerCommand::Stop) => {
+                    Ok(ControlCommand::Stop) => {
                         finished.store(true, std::sync::atomic::Ordering::Relaxed);
                         return Ok(());
                     }
-                    Ok(StreamerCommand::Rewind) => {
+                    Ok(ControlCommand::Rewind) => {
                         format
                             .seek(SeekMode::Accurate, SeekTo::TimeStamp { ts: 0, track_id })
                             .ok();
@@ -287,38 +298,26 @@ impl Streamer for SingleStreamer {
         })
     }
 
-    fn pause(&mut self) -> Result<(), StreamErr> {
-        let paused = self.paused.clone();
-        paused.store(true, std::sync::atomic::Ordering::Relaxed);
+    fn pause(&self) -> Result<(), StreamErr> {
+        self.control.pause();
         Ok(())
     }
 
-    fn resume(&mut self) -> Result<(), StreamErr> {
-        let paused = self.paused.clone();
-        paused.store(true, std::sync::atomic::Ordering::Relaxed);
+    fn resume(&self) -> Result<(), StreamErr> {
+        self.control.resume();
         Ok(())
     }
 
     fn stop(&self) -> Result<(), StreamErr> {
-        let tx = self.command_tx.as_ref().ok_or(StreamErr::NotPlaying)?;
-        tx.send(StreamerCommand::Stop)
-            .map_err(|_| StreamErr::SendError)
+        self.control.stop()
     }
 
-    fn seek(&self, _time: u64) -> Result<(), StreamErr> {
-        let tx = self.command_tx.as_ref().ok_or(StreamErr::NotPlaying)?;
-        let to = SeekTo::Time {
-            time: Time::from(_time),
-            track_id: None,
-        };
-        tx.send(StreamerCommand::Seek(to))
-            .map_err(|_| StreamErr::SendError)
+    fn seek(&self, time: u64) -> Result<(), StreamErr> {
+        self.control.seek(time)
     }
 
     fn rewind(&self) -> Result<(), StreamErr> {
-        let tx = self.command_tx.as_ref().ok_or(StreamErr::NotPlaying)?;
-        tx.send(StreamerCommand::Rewind)
-            .map_err(|_| StreamErr::SendError)
+        self.control.rewind()
     }
 
     fn get_input_sample_rate(&self) -> u32 {
@@ -337,11 +336,17 @@ impl Streamer for SingleStreamer {
         self.finished.clone()
     }
 
-  
-
     fn get_callback_handle(&self) -> StreamerCallBackHandle {
         StreamerCallBackHandle {
             shared: self.callback_handle.clone(),
         }
+    }
+
+    fn control_handle(&self) -> ControlHandle {
+        self.control.clone()
+    }
+
+    fn get_duration(&self) -> Option<u64> {
+        self.duration
     }
 }
