@@ -82,6 +82,8 @@ pub enum ControlCommand {
     Stop,
     Seek(u64),
     Rewind,
+    AddGainFunction(Box<dyn Fn(f32) -> f32 + Send>),
+    RemoveGainFunction
 }
 
 #[derive(Clone)]
@@ -137,6 +139,14 @@ impl ControlHandle {
         self.command_tx
             .send(command)
             .map_err(|_| StreamErr::SendError)
+    }
+
+    pub fn add_gain_function(&self, function: Box<dyn Fn(f32) -> f32 + Send>) -> Result<(), StreamErr> {
+        self.send(ControlCommand::AddGainFunction(function))
+    }
+
+    pub fn remove_gain_function(&self) -> Result<(), StreamErr> {
+        self.send(ControlCommand::RemoveGainFunction)
     }
 }
 

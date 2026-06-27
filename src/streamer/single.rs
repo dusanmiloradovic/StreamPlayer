@@ -49,12 +49,17 @@ fn resample(
     sender: &SyncSender<Vec<f32>>,
     input_channels: u16,
     samples: &[f32],
-) -> Result<(), StreamErr> {
+    resampled_so_far: usize, // the gain function depends on the time (that is the number of samples already resampled)
+    gain_function: Option<Box<dyn Fn(usize) -> f32 + Send>>,
+) -> Result<(usize), StreamErr> {
+    let mut cnt = resampled_so_far;
     if let Some(r) = resampler {
         resampling_buffer.extend_from_slice(samples);
         let samples_per_chunk = CHUNK_SIZE * input_channels as usize;
         let max_out_frames = r.output_frames_max();
         let mut outdata = vec![0.0f32; max_out_frames * input_channels as usize];
+        let mut resampled_len = 0;
+
         while resampling_buffer.len() >= samples_per_chunk {
             let actual_out_frames = {
                 let chunk = &resampling_buffer[..samples_per_chunk];
@@ -71,18 +76,45 @@ fn resample(
                     .or_else(|_| Err(StreamErr::ResamplingError))?
                     .1
             };
-            let resampled = &outdata[..actual_out_frames * input_channels as usize];
+            let resampled = &mut outdata[..actual_out_frames * input_channels as usize];
+            resampled_len += resampled.len();
+            cnt += resampled.len();
+            if let Some(ref gf) = gain_function {
+                let mut i: usize = 0;
+                for j in 0..actual_out_frames {
+                    let c = cnt + j;
+                    let g = gf(c);
+                    for _ in 0..input_channels as usize {
+                        resampled[i] *= g;
+                        i += 1;
+                    }
+                }
+            }
             sender
                 .send(resampled.to_vec())
                 .map_err(|_| StreamErr::SendError)?;
             resampling_buffer.drain(..samples_per_chunk);
         }
-        Ok(())
+        Ok(resampled_len)
     } else {
+        let mut samples_copy =samples.to_vec();
+        if let Some(ref gf)=gain_function {
+
+            let mut i: usize = 0;
+            for j in 0..samples_copy.len() {
+                let c = cnt + j;
+                let cc = c / input_channels as usize; // gain function is per "sample" (that is ,common for all channels)
+                let g = gf(cc);
+                for _ in 0..input_channels as usize {
+                    samples_copy[i] *= g;
+                    i += 1;
+                }
+            }
+        }
         sender
-            .send(samples.to_vec())
+            .send(samples_copy)
             .map_err(|_| StreamErr::SendError)?;
-        Ok(())
+        Ok(samples.len())
     }
 }
 
@@ -216,6 +248,8 @@ impl Streamer for SingleStreamer {
             let mut decoder = symphonia::default::get_codecs()
                 .make(&codec_params, &dec_opts)
                 .map_err(|_| StreamErr::UnsupportedCodec)?;
+            let mut gain_function: Option<Box<dyn Fn(f32) -> f32 + Send>> = None;
+            let mut resampled_len: usize = 0;
             loop {
                 while paused.load(std::sync::atomic::Ordering::Acquire) {
                     thread::sleep(std::time::Duration::from_millis(10));
@@ -239,7 +273,13 @@ impl Streamer for SingleStreamer {
                             .ok();
                         decoder.reset();
                     }
-                    Err(_) => {} // nothing pending, continue
+                    Ok(ControlCommand::AddGainFunction(gf)) => {
+                        gain_function = Some(gf);
+                    }
+                    Ok(ControlCommand::RemoveGainFunction) => {
+                        gain_function = None;
+                    } // nothing pending, continue
+                    Err(_) => {}
                 }
                 match callback_receiver.try_recv() {
                     Ok(Callback::CbOnSample(callback_time)) => {
@@ -282,13 +322,15 @@ impl Streamer for SingleStreamer {
                         }
                         if let Some(buf) = &mut sample_buf {
                             buf.copy_interleaved_ref(_decoded);
-                            resample(
+                            if let Ok(rl) = resample(
                                 &mut resampler,
                                 &mut resampling_buffer,
                                 &sender,
                                 channels_size,
                                 buf.samples(),
-                            )?;
+                            ) {
+                                resampled_len += rl;
+                            }
                         }
                     }
                     Err(Error::IoError(_)) | Err(Error::DecodeError(_)) => continue,

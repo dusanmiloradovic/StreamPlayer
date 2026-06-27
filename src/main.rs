@@ -27,8 +27,9 @@ fn main() {
     s1_callback_handle.add_callback(Duration::from_secs(1), Box::new(|| println!("S1 :)"))).unwrap_or_else(|e| println!("Error adding callback: {:?}", e));;
 
     let mixer_control = mixer.control_handle();
-    callback_handle.add_callback(Duration::from_secs(25), Box::new(move || mixer_control.stop().unwrap_or_else(|e| println!("Error stopping mixer: {:?}", e)))).unwrap_or_else(|e| println!("Error adding callback: {:?}", e));
     let mut player = stream_player::new_stream_player(Box::new(mixer)).unwrap();
+    callback_handle.add_callback(Duration::from_secs(25), Box::new(move || mixer_control.stop().unwrap_or_else(|e| println!("Error stopping mixer: {:?}", e)))).unwrap_or_else(|e| println!("Error adding callback: {:?}", e));
+
     let handle = player.start().unwrap();
     let file = File::open("./files/well-tempered-clavier-1.mp3").unwrap();
     let streamer2 = SingleStreamer::new(Box::new(file), "audio/mpeg".to_string()).unwrap();
@@ -37,6 +38,7 @@ fn main() {
     mixer_handle.add(Box::new(streamer2), 100, true);
    // streamer.add_callback(Default::default(), Box::new(|| println!("added")));
     handle.join().unwrap();
+
 
 
     // let file = File::open("./files/well-tempered-clavier-1.mp3").unwrap();
