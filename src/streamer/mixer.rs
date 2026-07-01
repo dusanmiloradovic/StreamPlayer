@@ -52,6 +52,18 @@ fn apply_mixer_control(
                 let _ = c.rewind();
             }
             false
+        },
+        ControlCommand::AddGainFunction(gf)=>{
+            for c in children {
+                let _ = c.add_gain_function(gf.clone());
+            }
+            false
+        } ,
+        ControlCommand::RemoveGainFunction => {
+            for c in children {
+                let _ = c.remove_gain_function();
+            }
+            false
         }
     }
 }

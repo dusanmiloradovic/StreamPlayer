@@ -50,8 +50,8 @@ fn resample(
     input_channels: u16,
     samples: &[f32],
     resampled_so_far: usize, // the gain function depends on the time (that is the number of samples already resampled)
-    gain_function: Option<Box<dyn Fn(usize) -> f32 + Send>>,
-) -> Result<(usize), StreamErr> {
+    gain_function: &Option<Arc<dyn Fn(usize) -> f32 + Send>>,
+) -> Result<usize, StreamErr> {
     let mut cnt = resampled_so_far;
     if let Some(r) = resampler {
         resampling_buffer.extend_from_slice(samples);
@@ -79,7 +79,7 @@ fn resample(
             let resampled = &mut outdata[..actual_out_frames * input_channels as usize];
             resampled_len += resampled.len();
             cnt += resampled.len();
-            if let Some(ref gf) = gain_function {
+            if let Some(gf) = gain_function {
                 let mut i: usize = 0;
                 for j in 0..actual_out_frames {
                     let c = cnt + j;
@@ -97,9 +97,8 @@ fn resample(
         }
         Ok(resampled_len)
     } else {
-        let mut samples_copy =samples.to_vec();
-        if let Some(ref gf)=gain_function {
-
+        let mut samples_copy = samples.to_vec();
+        if let Some(gf) = gain_function {
             let mut i: usize = 0;
             for j in 0..samples_copy.len() {
                 let c = cnt + j;
@@ -248,7 +247,7 @@ impl Streamer for SingleStreamer {
             let mut decoder = symphonia::default::get_codecs()
                 .make(&codec_params, &dec_opts)
                 .map_err(|_| StreamErr::UnsupportedCodec)?;
-            let mut gain_function: Option<Box<dyn Fn(f32) -> f32 + Send>> = None;
+            let mut gain_function: Option<Arc<dyn Fn(usize) -> f32 + Send>> = None;
             let mut resampled_len: usize = 0;
             loop {
                 while paused.load(std::sync::atomic::Ordering::Acquire) {
@@ -328,6 +327,8 @@ impl Streamer for SingleStreamer {
                                 &sender,
                                 channels_size,
                                 buf.samples(),
+                                resampled_len,
+                                &gain_function,
                             ) {
                                 resampled_len += rl;
                             }

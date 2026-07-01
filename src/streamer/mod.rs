@@ -67,7 +67,7 @@ impl StreamerCallbackShared {
                 cr.send(samples).unwrap();
             }
         }
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -82,7 +82,7 @@ pub enum ControlCommand {
     Stop,
     Seek(u64),
     Rewind,
-    AddGainFunction(Box<dyn Fn(f32) -> f32 + Send>),
+    AddGainFunction(Arc<dyn Fn(usize) -> f32 + Send + Sync>),
     RemoveGainFunction
 }
 
@@ -141,7 +141,8 @@ impl ControlHandle {
             .map_err(|_| StreamErr::SendError)
     }
 
-    pub fn add_gain_function(&self, function: Box<dyn Fn(f32) -> f32 + Send>) -> Result<(), StreamErr> {
+    pub fn add_gain_function(&self, function: Arc<dyn Fn(usize) -> f32 + Send + Sync>) -> Result<(), StreamErr> {
+        // Arc instead of Box since we can reuse the function between child streams
         self.send(ControlCommand::AddGainFunction(function))
     }
 
