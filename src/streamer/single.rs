@@ -81,13 +81,10 @@ fn resample(
             cnt += resampled.len();
             if let Some(gf) = gain_function {
                 let mut i: usize = 0;
-                for j in 0..actual_out_frames {
+                for j in 0..resampled_len {
                     let c = cnt + j;
                     let g = gf(c);
-                    for _ in 0..input_channels as usize {
-                        resampled[i] *= g;
-                        i += 1;
-                    }
+                    resampled[j] *=g;
                 }
             }
             sender
@@ -102,12 +99,8 @@ fn resample(
             let mut i: usize = 0;
             for j in 0..samples_copy.len() {
                 let c = cnt + j;
-                let cc = c / input_channels as usize; // gain function is per "sample" (that is ,common for all channels)
-                let g = gf(cc);
-                for _ in 0..input_channels as usize {
-                    samples_copy[i] *= g;
-                    i += 1;
-                }
+                let g = gf(c);
+                samples_copy[j] *= g;
             }
         }
         sender
