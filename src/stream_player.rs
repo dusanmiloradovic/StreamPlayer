@@ -1,7 +1,7 @@
 use async_broadcast::broadcast;
-use audio_learn::streamer::Callback;
-use audio_learn::streamer::Callback::CbOnSample;
-use audio_learn::streamer::{StreamErr, Streamer};
+use crate::streamer::Callback;
+use crate::streamer::Callback::CbOnSample;
+use crate::streamer::{StreamErr, Streamer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{default_host, StreamError, SupportedStreamConfig};
 use ringbuf::{traits::*, HeapRb};

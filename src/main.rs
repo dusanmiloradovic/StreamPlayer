@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-pub mod stream_player;
+use audio_learn::stream_player;
 
 fn main() {
     let file = File::open("./files/well-tempered-clavier-1.mp3").unwrap();
