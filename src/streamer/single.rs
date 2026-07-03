@@ -267,9 +267,11 @@ impl Streamer for SingleStreamer {
                     }
                     Ok(ControlCommand::AddGainFunction(gf)) => {
                         gain_function = Some(gf);
+                        resampled_len = 0; // gain functions starts from the sample 0
                     }
                     Ok(ControlCommand::RemoveGainFunction) => {
                         gain_function = None;
+                        resampled_len = 0;
                     } // nothing pending, continue
                     Err(_) => {}
                 }

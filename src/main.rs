@@ -23,15 +23,15 @@ fn main() {
     let sample_rate = mixer.get_output_sample_rate();
     let channels = mixer.get_input_channel_count() as u32;
     // TODO what happens when we have a mono channel streamer?
-    let durSec = 10;
+    let durSec = 15;
     let samples_in_10s = (sample_rate * channels * durSec) as usize;
 
     let fnx = move |x: usize| {
         if x < samples_in_10s {
-           // return ((samples_in_10s - x) / samples_in_10s) as f32;
-            return 0.75;
+           return (samples_in_10s - x) as f32 / samples_in_10s as f32;
+            //return 0.75;
         }
-        return 0.25;
+        return 0.0;
     };
 
     //callback_handle.add_callback(Duration::from_millis(2001), Box::new(|| println!("YOYOYO"))).unwrap_or_else(|e| println!("Error adding callback: {:?}", e));
@@ -46,12 +46,12 @@ fn main() {
 
 
     let mixer_control = mixer.control_handle();
-    let arcF = Arc::new(fnx);
+    let arc_f = Arc::new(fnx);
     let mxc = mixer_control.clone();
-    let arcF = arcF.clone();
+    //let arcF = arcF.clone();
     callback_handle
         .add_callback(Duration::from_secs(4), Box::new(move|| {
-            mxc.add_gain_function(arcF.clone()).expect("TODO: panic message");
+            mxc.add_gain_function(arc_f.clone()).expect("TODO: panic message");
             ()
         })).expect("TODO: panic message");
     let mut player = stream_player::new_stream_player(Box::new(mixer)).unwrap();
