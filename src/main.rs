@@ -23,15 +23,25 @@ fn main() {
     let sample_rate = mixer.get_output_sample_rate();
     let channels = mixer.get_input_channel_count() as u32;
     // TODO what happens when we have a mono channel streamer?
-    let durSec = 15;
+    let durSec = 10;
     let samples_in_10s = (sample_rate * channels * durSec) as usize;
 
-    let fnx = move |x: usize| {
+    let linear_fadeout = move |x: usize| {
         if x < samples_in_10s {
            return (samples_in_10s - x) as f32 / samples_in_10s as f32;
             //return 0.75;
         }
         return 0.0;
+    };
+
+    let fadeout_log = move |x: usize| {
+        if x >= samples_in_10s {
+            return 0.0;
+        }
+        let t = x as f32 / samples_in_10s as f32;
+        let floor_db = -60.0_f32;
+        let db = floor_db * t;
+        10.0_f32.powf(db / 20.0)
     };
 
     //callback_handle.add_callback(Duration::from_millis(2001), Box::new(|| println!("YOYOYO"))).unwrap_or_else(|e| println!("Error adding callback: {:?}", e));
@@ -46,7 +56,7 @@ fn main() {
 
 
     let mixer_control = mixer.control_handle();
-    let arc_f = Arc::new(fnx);
+    let arc_f = Arc::new(fadeout_log);
     let mxc = mixer_control.clone();
     //let arcF = arcF.clone();
     callback_handle
