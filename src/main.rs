@@ -22,7 +22,7 @@ fn main() {
     let callback_handle = mixer.get_callback_handle();
     let sample_rate = mixer.get_output_sample_rate();
     let channels = mixer.get_input_channel_count() as u32;
-    // TODO what happens when we have a mono channel streamer?
+
     let durSec = 10;
     let samples_in_10s = (sample_rate * channels * durSec) as usize;
 
