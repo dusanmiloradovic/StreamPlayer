@@ -208,22 +208,22 @@ impl StreamPlayerImpl {
         Ok(handle)
     }
 
-    pub fn pause(&mut self) -> Result<(), StreamErr> {
+    pub fn pause(&mut self) {
         let command_sender = self.command_sender.as_ref().unwrap();
         command_sender.send(StreamCommand::Pause).unwrap();
-        self.streamer.as_mut().unwrap().pause()
+        self.streamer.as_mut().unwrap().control_handle().pause()
     }
 
-    pub fn resume(&mut self) -> Result<(), StreamErr> {
+    pub fn resume(&mut self)  {
         let command_sender = self.command_sender.as_ref().unwrap();
         command_sender.send(StreamCommand::Resume).unwrap();
-        self.streamer.as_mut().unwrap().resume()
+        self.streamer.as_mut().unwrap().control_handle().resume()
     }
 
     pub fn stop(&mut self) -> Result<(), StreamErr> {
         let command_sender = self.command_sender.as_ref().unwrap();
         command_sender.send(StreamCommand::Stop).unwrap();
-        self.streamer.take().unwrap().stop()
+        self.streamer.take().unwrap().control_handle().stop()
     }
 
     pub fn get_play_time_ms(&self) -> f32 {

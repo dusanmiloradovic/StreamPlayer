@@ -14,7 +14,7 @@ use std::thread;
 use std::thread::JoinHandle;
 
 enum MixerCommand {
-    Stop(usize),
+    Stop(usize), // stop the nth channel
     Add {
         shared_buf: Arc<Mutex<VecDeque<f32>>>,
         index: Arc<AtomicUsize>,
@@ -483,33 +483,7 @@ impl Streamer for Mixer {
             Ok(())
         })
     }
-
-    // Transport control is delegated to the shared `ControlHandle`. The mixing
-    // thread drains the command channel and fans stop/seek/rewind out to the
-    // children (see `apply_mixer_control`); pause/resume flip the shared flag
-    // the mixing thread parks on. This is identical to `SingleStreamer` — the
-    // only per-streamer difference (fan-out vs. decoder seek) lives in `play()`.
-    fn pause(&self) -> Result<(), StreamErr> {
-        self.control.pause();
-        Ok(())
-    }
-
-    fn resume(&self) -> Result<(), StreamErr> {
-        self.control.resume();
-        Ok(())
-    }
-
-    fn stop(&self) -> Result<(), StreamErr> {
-        self.control.stop()
-    }
-
-    fn seek(&self, time: u64) -> Result<(), StreamErr> {
-        self.control.seek(time)
-    }
-
-    fn rewind(&self) -> Result<(), StreamErr> {
-        self.control.rewind()
-    }
+    
 
     fn get_input_sample_rate(&self) -> u32 {
         self.streamers[0].get_input_sample_rate()

@@ -3,10 +3,10 @@ use audio_learn::streamer::single::SingleStreamer;
 use audio_learn::streamer::Streamer;
 use std::fs::File;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 use audio_learn::stream_player;
+use audio_learn::streamer::utils::f_fadeout_log;
 
 fn main() {
     let file = File::open("./files/well-tempered-clavier-1.mp3").unwrap();
@@ -25,24 +25,7 @@ fn main() {
 
     let durSec = 10;
     let samples_in_10s = (sample_rate * channels * durSec) as usize;
-
-    let linear_fadeout = move |x: usize| {
-        if x < samples_in_10s {
-           return (samples_in_10s - x) as f32 / samples_in_10s as f32;
-            //return 0.75;
-        }
-        return 0.0;
-    };
-
-    let fadeout_log = move |x: usize| {
-        if x >= samples_in_10s {
-            return 0.0;
-        }
-        let t = x as f32 / samples_in_10s as f32;
-        let floor_db = -60.0_f32;
-        let db = floor_db * t;
-        10.0_f32.powf(db / 20.0)
-    };
+    
 
     //callback_handle.add_callback(Duration::from_millis(2001), Box::new(|| println!("YOYOYO"))).unwrap_or_else(|e| println!("Error adding callback: {:?}", e));
 
@@ -56,7 +39,7 @@ fn main() {
 
 
     let mixer_control = mixer.control_handle();
-    let arc_f = Arc::new(fadeout_log);
+    let arc_f = Arc::new(move |x| f_fadeout_log(x, samples_in_10s));
     let mxc = mixer_control.clone();
     //let arcF = arcF.clone();
     callback_handle

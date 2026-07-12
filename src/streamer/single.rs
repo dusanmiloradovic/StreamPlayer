@@ -335,29 +335,7 @@ impl Streamer for SingleStreamer {
             }
         })
     }
-
-    fn pause(&self) -> Result<(), StreamErr> {
-        self.control.pause();
-        Ok(())
-    }
-
-    fn resume(&self) -> Result<(), StreamErr> {
-        self.control.resume();
-        Ok(())
-    }
-
-    fn stop(&self) -> Result<(), StreamErr> {
-        self.control.stop()
-    }
-
-    fn seek(&self, time: u64) -> Result<(), StreamErr> {
-        self.control.seek(time)
-    }
-
-    fn rewind(&self) -> Result<(), StreamErr> {
-        self.control.rewind()
-    }
-
+    
     fn get_input_sample_rate(&self) -> u32 {
         self.input_sample_rate
     }
