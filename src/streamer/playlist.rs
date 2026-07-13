@@ -27,7 +27,6 @@ pub struct PlayListStreamer {
     sync_tx: Option<Sender<usize>>,
     callback_receiver: Option<Receiver<Callback>>,
     command_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
-    callback_handle: Arc<Mutex<StreamerCallbackShared>>,
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
     cross_fade_type: CrossFadeType,
 }
@@ -43,7 +42,6 @@ impl PlayListStreamer {
             sync_tx: None,
             callback_receiver: None,
             command_rx: None,
-            callback_handle: Arc::new(Mutex::new(StreamerCallbackShared::new())),
             callbacks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -55,14 +53,18 @@ fn loop_no_crossfade(
     callback_receiver: Receiver<Callback>,
     callback_register: SyncSender<u64>,
 ) {
-    let streamers = streamer_queue.lock().unwrap();
-    if streamers.len() == 0 {
-        return ();
-    }
+    let current = {
+        let mut streamers = streamer_queue.lock().unwrap();
+        if streamers.len() == 0 {
+            return ();
+        }
+        streamers.remove(0)
+    };
+
+
     let sender_clone = sender.clone();
     let callback_receiver_clone = callback_receiver.clone();
     let callback_register_clone = callback_register.clone();
-    let current = streamer_queue.lock().unwrap().remove(0);
     let inital_streamers = vec![current];
     let mut mixer = Mixer::new(inital_streamers, vec![1]);
     let mixer_thread = mixer.play(sender, callback_receiver, callback_register);
@@ -70,6 +72,7 @@ fn loop_no_crossfade(
         println!("Error: {:?}", some);
         return (); // TODO work on the error type return from joinhandle
     }
+
     loop_no_crossfade(
         streamer_queue.clone(),
         sender_clone,
@@ -90,8 +93,7 @@ impl Streamer for PlayListStreamer {
             return thread::spawn(move || Ok(()));
         }
 
-        let current = streamers.lock().unwrap().remove(0);
-        let dur = current.get_duration();
+        let dur = streamers.lock().unwrap()[0].get_duration();
         let mut sample_cutoff = 0 as usize;
         let mut second_stream_cutoff = 0 as usize;
         let mut fade_in_function: Option<Box<dyn Fn(usize) -> f32>> = None;
@@ -134,6 +136,7 @@ impl Streamer for PlayListStreamer {
                 Ok(())
             });
         }
+        let current = streamers.lock().unwrap().remove(0);
         let initial_streamers = vec![current];
         let mut mixer = Mixer::new(initial_streamers, vec![1]);
         let mixer_handle = mixer.handle();
@@ -145,15 +148,15 @@ impl Streamer for PlayListStreamer {
     }
 
     fn get_input_sample_rate(&self) -> u32 {
-        self.streamers[0].get_input_sample_rate()
+        self.streamers.lock().unwrap()[0].get_input_sample_rate()
     }
 
     fn get_input_channel_count(&self) -> u16 {
-        self.streamers[0].get_input_channel_count()
+        self.streamers.lock().unwrap()[0].get_input_channel_count()
     }
 
     fn get_output_sample_rate(&self) -> u32 {
-        self.streamers[0].get_output_sample_rate()
+        self.streamers.lock().unwrap()[0].get_output_sample_rate()
     }
 
     fn finished_flag(&self) -> Arc<AtomicBool> {

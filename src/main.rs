@@ -6,9 +6,28 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use audio_learn::stream_player;
+use audio_learn::streamer::playlist::{CrossFadeType, PlayListStreamer};
 use audio_learn::streamer::utils::f_fadeout_log;
 
 fn main() {
+    run_playlist();
+    //handle.join().unwrap();
+}
+
+fn run_playlist(){
+    let f2 =  File::open("./files/well-tempered-clavier-1.mp3").unwrap();
+    let f1 = File::open("./files/lost_in_the_city.mp3").unwrap();
+    let f3 = File::open("./files/long-audio-5min.mp3").unwrap();
+    let s1= SingleStreamer::new(Box::new(f1),"audio/mpeg".to_string()).unwrap();
+    let s2= SingleStreamer::new(Box::new(f2),"audio/mpeg".to_string()).unwrap();
+    let s3= SingleStreamer::new(Box::new(f3),"audio/mpeg".to_string()).unwrap();
+    let streamers: Vec<Box<dyn Streamer>> = vec![Box::new(s1), Box::new(s2), Box::new(s3)];
+    let playList = PlayListStreamer::new(streamers, CrossFadeType::None);
+    let mut player = stream_player::new_stream_player(Box::new(playList)).unwrap();
+    let handle = player.start().unwrap();
+    handle.join().unwrap();
+}
+fn run_mixer() {
     let file = File::open("./files/well-tempered-clavier-1.mp3").unwrap();
     let streamer = SingleStreamer::new(Box::new(file), "audio/mpeg".to_string()).unwrap();
     let f2 = File::open("./files/lost_in_the_city.mp3").unwrap();
@@ -25,7 +44,6 @@ fn main() {
 
     let durSec = 10;
     let samples_in_10s = (sample_rate * channels * durSec) as usize;
-    
 
     //callback_handle.add_callback(Duration::from_millis(2001), Box::new(|| println!("YOYOYO"))).unwrap_or_else(|e| println!("Error adding callback: {:?}", e));
 
@@ -36,17 +54,20 @@ fn main() {
         .add_callback(Duration::from_secs(1), Box::new(|| println!("S1 :)")))
         .unwrap_or_else(|e| println!("Error adding callback: {:?}", e));
 
-
-
     let mixer_control = mixer.control_handle();
     let arc_f = Arc::new(move |x| f_fadeout_log(x, samples_in_10s));
     let mxc = mixer_control.clone();
     //let arcF = arcF.clone();
     callback_handle
-        .add_callback(Duration::from_secs(4), Box::new(move|| {
-            mxc.add_gain_function(arc_f.clone()).expect("TODO: panic message");
-            ()
-        })).expect("TODO: panic message");
+        .add_callback(
+            Duration::from_secs(4),
+            Box::new(move || {
+                mxc.add_gain_function(arc_f.clone())
+                    .expect("TODO: panic message");
+                ()
+            }),
+        )
+        .expect("TODO: panic message");
     let mut player = stream_player::new_stream_player(Box::new(mixer)).unwrap();
     callback_handle
         .add_callback(
