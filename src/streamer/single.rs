@@ -64,29 +64,24 @@ fn resample(
             let actual_out_frames = {
                 let chunk = &resampling_buffer[..samples_per_chunk];
                 let input_adapter =
-                    InterleavedSlice::new(chunk, input_channels as usize, CHUNK_SIZE)
-                        .or_else(|_| Err(StreamErr::ResamplingError))?;
+                    InterleavedSlice::new(chunk, input_channels as usize, CHUNK_SIZE).map_err(|_| StreamErr::ResamplingError)?;
                 let mut output_adapter = InterleavedSlice::new_mut(
                     &mut outdata,
                     input_channels as usize,
                     max_out_frames,
-                )
-                .or_else(|_| Err(StreamErr::ResamplingError))?;
-                r.process_into_buffer(&input_adapter, &mut output_adapter, None)
-                    .or_else(|_| Err(StreamErr::ResamplingError))?
+                ).map_err(|_| StreamErr::ResamplingError)?;
+                r.process_into_buffer(&input_adapter, &mut output_adapter, None).map_err(|_| StreamErr::ResamplingError)?
                     .1
             };
             let resampled = &mut outdata[..actual_out_frames * input_channels as usize];
-            resampled_len += resampled.len();
-            cnt += resampled.len();
             if let Some(gf) = gain_function {
-                let mut i: usize = 0;
-                for j in 0..resampled_len {
-                    let c = cnt + j;
-                    let g = gf(c);
-                    resampled[j] *=g;
+                for j in 0..resampled.len() {
+                    let g = gf(cnt + j);
+                    resampled[j] *= g;
                 }
             }
+            resampled_len += resampled.len();
+            cnt += resampled.len();
             sender
                 .send(resampled.to_vec())
                 .map_err(|_| StreamErr::SendError)?;
@@ -96,10 +91,8 @@ fn resample(
     } else {
         let mut samples_copy = samples.to_vec();
         if let Some(gf) = gain_function {
-            let mut i: usize = 0;
             for j in 0..samples_copy.len() {
-                let c = cnt + j;
-                let g = gf(c);
+                let g = gf(cnt + j);
                 samples_copy[j] *= g;
             }
         }
@@ -153,12 +146,10 @@ impl SingleStreamer {
             config_range.max_sample_rate(),
         );
         let config_sample_rate = config_range.with_sample_rate(closest).sample_rate();
-        let time_base = codec_params.time_base;
         let mut duration = None;
-        if let Some(tb) = time_base {
-            let t = tb.calc_time(3);
-            let d: u64 = t.seconds * 1000 + (t.frac * 1000f64) as u64;
-            duration = Some(d);
+        if let (Some(tb), Some(n_frames)) = (codec_params.time_base, codec_params.n_frames) {
+            let t = tb.calc_time(n_frames);
+            duration = Some(t.seconds + t.frac.round() as u64);
         }
 
         let callbacks = Arc::new(Mutex::new(HashMap::new()));
@@ -335,7 +326,7 @@ impl Streamer for SingleStreamer {
             }
         })
     }
-    
+
     fn get_input_sample_rate(&self) -> u32 {
         self.input_sample_rate
     }

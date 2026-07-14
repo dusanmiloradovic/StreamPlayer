@@ -22,7 +22,7 @@ fn run_playlist(){
     let s2= SingleStreamer::new(Box::new(f2),"audio/mpeg".to_string()).unwrap();
     let s3= SingleStreamer::new(Box::new(f3),"audio/mpeg".to_string()).unwrap();
     let streamers: Vec<Box<dyn Streamer>> = vec![Box::new(s1), Box::new(s2), Box::new(s3)];
-    let playList = PlayListStreamer::new(streamers, CrossFadeType::None);
+    let playList = PlayListStreamer::new(streamers, CrossFadeType::Linear(20f32));
     let mut player = stream_player::new_stream_player(Box::new(playList)).unwrap();
     let handle = player.start().unwrap();
     handle.join().unwrap();
