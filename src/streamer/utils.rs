@@ -5,9 +5,13 @@ pub fn execute_callback(
     callbacks: &Mutex<HashMap<u64, Box<dyn Fn() + Send>>>,
     callback_time: u64,
 ) {
-    match callbacks.lock().unwrap().get(&callback_time) {
-        Some(cb) => cb(),
-        None => {},
+    // Take the callback out and release the lock BEFORE invoking it. Callbacks
+    // are one-shot, and a callback may itself call `add_callback` (which locks
+    // this same map) to schedule the next one — holding the lock across `cb()`
+    // would deadlock.
+    let cb = callbacks.lock().unwrap().remove(&callback_time);
+    if let Some(cb) = cb {
+        cb();
     }
 }
 
