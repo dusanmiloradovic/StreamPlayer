@@ -1,8 +1,9 @@
 use crate::streamer::utils::execute_callback;
 use crate::streamer::{
-    Callback, ControlCommand, ControlHandle, StreamErr, Streamer, StreamerCallBackHandle,
-    StreamerCallbackShared,
+    Callback, ControlCommand, ControlHandle, StreamErr, Streamer, StreamerAddError,
+    StreamerCallBackHandle, StreamerCallbackShared,
 };
+use std::time::Duration;
 use async_broadcast::Receiver;
 use crossbeam_channel::{bounded, select, Sender};
 use std::collections::{HashMap, VecDeque};
@@ -86,6 +87,10 @@ pub struct Mixer {
     callback_receiver: Option<Receiver<Callback>>,
     callback_handle: Arc<Mutex<StreamerCallbackShared>>,
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
+    // When true, output is averaged by 1/total_weight (safe for simultaneous
+    // mixing). When false, channels are summed as-is — used for crossfades,
+    // where the per-channel fade gains already sum to ~unity.
+    normalize_gain: bool,
 }
 
 struct MixerShared {
@@ -98,6 +103,7 @@ struct MixerShared {
 /// A handle to a `Mixer` that can be retained by the caller after the `Mixer`
 /// is moved into a player. Allows adding/removing channels while playback is
 /// running.
+#[derive(Clone)]
 pub struct MixerHandle {
     shared: Arc<Mutex<MixerShared>>,
     callback_shared: Arc<Mutex<StreamerCallbackShared>>,
@@ -148,7 +154,15 @@ impl Mixer {
                 pending_callbacks: Arc::new(Mutex::new(vec![])),
                 callbacks: callbacks.clone(),
             })),
+            normalize_gain: true,
         }
+    }
+
+    /// Disables (`false`) or enables (`true`) 1/total_weight averaging.
+    /// Set to `false` for crossfade mixing so complementary fade gains sum
+    /// to unity instead of being halved.
+    pub fn set_normalize_gain(&mut self, normalize: bool) {
+        self.normalize_gain = normalize;
     }
 
     /// Returns a `MixerHandle` that can be used to add/remove channels after
@@ -293,6 +307,17 @@ impl MixerHandle {
             tx.send(MixerCommand::Stop(ch_no)).unwrap_or(());
         }
     }
+
+    /// Schedules `cb` to run once playback reaches `after` (measured from the
+    /// start of the stream). Delegates to the same callback machinery as
+    /// `add_callback`, so it works before or after `play()` has started.
+    pub fn schedule_callback(
+        &self,
+        after: Duration,
+        cb: Box<dyn Fn() + Send>,
+    ) -> Result<(), StreamerAddError> {
+        self.callback_shared.lock().unwrap().add_callback(after, cb)
+    }
 }
 
 impl Streamer for Mixer {
@@ -374,6 +399,7 @@ impl Streamer for Mixer {
         let play_position = self.play_position.clone();
 
         let callbacks = self.callbacks.clone();
+        let normalize_gain = self.normalize_gain;
         let mut callback_receiver = callback_receiver;
         thread::spawn(move || {
             while let Ok(Callback::CbOnSample(callback_time)) = callback_receiver.recv_blocking() {
@@ -428,7 +454,9 @@ impl Streamer for Mixer {
                                 .filter(|(j, _)| !finished_flags[*j].load(Relaxed))
                                 .map(|(_, w)| w.load(Relaxed))
                                 .sum();
-                            let koef = if total_weight > 0 {
+                            let koef = if !normalize_gain {
+                                1.0
+                            } else if total_weight > 0 {
                                 1.0 / total_weight as f32
                             } else {
                                 0.0

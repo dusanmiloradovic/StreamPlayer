@@ -1,4 +1,4 @@
-use crate::streamer::mixer::Mixer;
+use crate::streamer::mixer::{Mixer, MixerHandle};
 use crate::streamer::utils::{f_fadein_linear, f_fadein_log, f_fadeout_linear, f_fadeout_log};
 use crate::streamer::{
     Callback, ControlCommand, ControlHandle, StreamErr, Streamer, StreamerCallBackHandle,
@@ -13,7 +13,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum CrossFadeType {
     Linear(f32),
     None,
@@ -80,76 +80,51 @@ fn loop_no_crossfade(
     )
 }
 
-type FadeFn = Box<dyn Fn(usize) -> f32 + Send + Sync>;
+type FadeFn = Arc<dyn Fn(usize) -> f32 + Send + Sync>;
 
-struct FadeConfig {
-    cutoff_duration: u64,
-    fade_in: FadeFn,
-    fade_out: FadeFn,
+fn build_fades(fade_type: CrossFadeType, fade_samples: usize) -> (FadeFn, FadeFn) {
+    match fade_type {
+        CrossFadeType::Logarithmic(_) => (
+            Arc::new(move |x| f_fadein_log(x, fade_samples)),
+            Arc::new(move |x| f_fadeout_log(x, fade_samples)),
+        ),
+        _ => (
+            Arc::new(move |x| f_fadein_linear(x, fade_samples)),
+            Arc::new(move |x| f_fadeout_linear(x, fade_samples)),
+        ),
+    }
 }
 
-fn loop_crossfade(
-    streamer_queue: Arc<Mutex<Vec<Box<dyn Streamer>>>>,
-    sender: SyncSender<Vec<f32>>,
-    callback_receiver: Receiver<Callback>,
-    callback_register: SyncSender<u64>,
-    fade_config: Arc<FadeConfig>,
-    initial: bool,
-) {
-    let current = {
-        let mut streamers = streamer_queue.lock().unwrap();
-        if streamers.is_empty() {
-            return;
-        }
-        streamers.remove(0)
-    };
+struct CrossfadeCtx {
+    queue: Arc<Mutex<Vec<Box<dyn Streamer>>>>,
+    handle: MixerHandle,
+    fade_type: CrossFadeType,
+    fade_secs: u64,
+    fade_samples: usize,
+}
 
-    let fade_config_clone = fade_config.clone();
-    let f: FadeFn = {
-        if initial {
-            Box::new(move |x| (fade_config_clone.fade_out)(x))
-        } else {
-            Box::new(move |x| (fade_config_clone.fade_in)(x) * (fade_config_clone.fade_out)(x))
-            // ramp_up, constant, ramp_down
+fn schedule_crossfade(ctx: Arc<CrossfadeCtx>, outgoing_control: ControlHandle, cutoff_secs: u64) {
+    let ctx_cb = ctx.clone();
+    let cb: Box<dyn Fn() + Send> = Box::new(move || {
+        let next = {
+            let mut q = ctx_cb.queue.lock().unwrap();
+            if q.is_empty() {
+                return; // playlist exhausted: let the current track play out.
+            }
+            q.remove(0)
+        };
+        let next_dur = next.get_duration();
+        let next_control = next.control_handle();
+        let (fade_in, fade_out) = build_fades(ctx_cb.fade_type, ctx_cb.fade_samples);
+        let _ = outgoing_control.add_gain_function(fade_out);
+        let _ = next_control.add_gain_function(fade_in);
+        ctx_cb.handle.add(next, 1, false);
+        if let Some(d) = next_dur {
+            let next_cutoff = cutoff_secs + d.saturating_sub(ctx_cb.fade_secs);
+            schedule_crossfade(ctx_cb.clone(), next_control, next_cutoff);
         }
-    };
-    let sender_clone = sender.clone();
-    let callback_receiver_clone = callback_receiver.clone();
-    let callback_register_clone = callback_register.clone();
-    let inital_streamers = vec![current];
-    let mut mixer = Mixer::new(inital_streamers, vec![1]);
-    let mixer_control_handle = mixer.control_handle();
-    let mixer_callback_handle = mixer.get_callback_handle();
-    if mixer_control_handle.add_gain_function(Arc::new(f)).is_err() {
-        return;
-    };
-    let fade_config_clone = fade_config.clone();
-    if mixer_callback_handle
-        .add_callback(
-            Duration::from_secs(fade_config_clone.cutoff_duration),
-            Box::new(move || {
-                loop_crossfade(
-                    streamer_queue.clone(),
-                    sender.clone(),
-                    callback_receiver.clone(),
-                    callback_register.clone(),
-                    fade_config.clone(),
-                    false,
-                );
-            }),
-        )
-        .is_err()
-    {
-        return;
-    }
-    let mixer_thread = mixer.play(
-        sender_clone,
-        callback_receiver_clone,
-        callback_register_clone,
-    );
-    if let Err(some) = mixer_thread.join().unwrap() {
-        println!("Error: {:?}", some);
-    }
+    });
+    let _ = ctx.handle.schedule_callback(Duration::from_secs(cutoff_secs), cb);
 }
 
 impl Streamer for PlayListStreamer {
@@ -164,47 +139,17 @@ impl Streamer for PlayListStreamer {
             return thread::spawn(move || Ok(()));
         }
 
-        let dur = streamers.lock().unwrap()[0].get_duration();
-        let mut sample_cutoff = 0usize;
-        let mut second_stream_cutoff = 0usize;
-        let mut fade_in_function: Option<Box<dyn Fn(usize) -> f32 + Send + Sync>> = None;
-        let mut fade_out_function: Option<Box<dyn Fn(usize) -> f32 + Send + Sync>> = None;
-        let mut fade_out_after_s = 0u64;
+        // Fade duration in whole seconds; 0 means "no crossfade".
+        let fade_secs = match self.cross_fade_type {
+            CrossFadeType::Linear(f) | CrossFadeType::Logarithmic(f) => f as u64,
+            CrossFadeType::None => 0,
+        };
+        let first_dur = streamers.lock().unwrap()[0].get_duration();
 
-        if let Some(duration) = dur
-            && self.cross_fade_type != CrossFadeType::None
-        {
-            let duration_samples = self.get_input_channel_count() as usize
-                * self.get_input_sample_rate() as usize
-                * duration as usize;
-            match self.cross_fade_type {
-                CrossFadeType::Linear(fade_duration) => {
-                    second_stream_cutoff = self.get_input_channel_count() as usize
-                        * self.get_input_sample_rate() as usize
-                        * fade_duration as usize;
-                    sample_cutoff = duration_samples - second_stream_cutoff;
-                    fade_in_function =
-                        Some(Box::new(move |x| f_fadein_linear(x, second_stream_cutoff)));
-                    fade_out_function =
-                        Some(Box::new(move |x| f_fadeout_linear(x, second_stream_cutoff)));
-                    fade_out_after_s = duration as u64 - fade_duration as u64;
-                }
-                CrossFadeType::Logarithmic(fade_duration) => {
-                    second_stream_cutoff = self.get_input_channel_count() as usize
-                        * self.get_input_sample_rate() as usize
-                        * fade_duration as usize;
-                    sample_cutoff = duration_samples - second_stream_cutoff;
-                    fade_in_function =
-                        Some(Box::new(move |x| f_fadein_log(x, second_stream_cutoff)));
-                    fade_out_function =
-                        Some(Box::new(move |x| f_fadeout_log(x, second_stream_cutoff)));
-                    fade_out_after_s = duration as u64 - fade_duration as u64;
-                }
-                CrossFadeType::None => {}
-            }
-        }
-        if sample_cutoff == 0 {
-            thread::spawn(move || {
+        // No crossfade requested, or the first track's length is unknown (can't
+        // schedule a cutoff): fall back to gapless sequential playback.
+        if fade_secs == 0 || first_dur.is_none() {
+            return thread::spawn(move || {
                 loop_no_crossfade(
                     streamers.clone(),
                     sender.clone(),
@@ -212,24 +157,33 @@ impl Streamer for PlayListStreamer {
                     callback_register,
                 );
                 Ok(())
-            })
-        } else {
-            thread::spawn(move || {
-                loop_crossfade(
-                    streamers.clone(),
-                    sender.clone(),
-                    callback_receiver,
-                    callback_register,
-                    Arc::new(FadeConfig {
-                        cutoff_duration: fade_out_after_s,
-                        fade_in: fade_in_function.unwrap(),
-                        fade_out: fade_out_function.unwrap(),
-                    }),
-                    true,
-                );
-                Ok(())
-            })
+            });
         }
+
+        let first = streamers.lock().unwrap().remove(0);
+        let channels = first.get_input_channel_count();
+        let out_rate = first.get_output_sample_rate();
+        let fade_samples = channels as usize * out_rate as usize * fade_secs as usize;
+        let first_control = first.control_handle();
+
+        let mut mixer = Mixer::new(vec![first], vec![1]);
+        mixer.set_normalize_gain(false); // sum complementary fade gains, don't average
+        let handle = mixer.handle();
+
+        let ctx = Arc::new(CrossfadeCtx {
+            queue: streamers.clone(),
+            handle: handle.clone(),
+            fade_type: self.cross_fade_type,
+            fade_secs,
+            fade_samples,
+        });
+
+        // First crossfade fires `fade_secs` before the first track ends. This is
+        // registered before play() and flushed from pending_callbacks on start.
+        let cutoff = first_dur.unwrap().saturating_sub(fade_secs);
+        schedule_crossfade(ctx, first_control, cutoff);
+
+        mixer.play(sender, callback_receiver, callback_register)
     }
 
     fn get_input_sample_rate(&self) -> u32 {
