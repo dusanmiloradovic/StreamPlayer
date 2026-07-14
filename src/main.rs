@@ -15,9 +15,9 @@ fn main() {
 }
 
 fn run_playlist(){
-    let f2 =  File::open("./files/well-tempered-clavier-1.mp3").unwrap();
-    let f1 = File::open("./files/lost_in_the_city.mp3").unwrap();
-    let f3 = File::open("./files/long-audio-5min.mp3").unwrap();
+    let f3 =  File::open("./files/well-tempered-clavier-1.mp3").unwrap();
+    let f2 = File::open("./files/lost_in_the_city.mp3").unwrap();
+    let f1 = File::open("./files/long-audio-5min.mp3").unwrap();
     let s1= SingleStreamer::new(Box::new(f1),"audio/mpeg".to_string()).unwrap();
     let s2= SingleStreamer::new(Box::new(f2),"audio/mpeg".to_string()).unwrap();
     let s3= SingleStreamer::new(Box::new(f3),"audio/mpeg".to_string()).unwrap();
