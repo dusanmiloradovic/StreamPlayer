@@ -109,7 +109,7 @@ fn schedule_crossfade(ctx: Arc<CrossfadeCtx>, outgoing_control: ControlHandle, c
         let next = {
             let mut q = ctx_cb.queue.lock().unwrap();
             if q.is_empty() {
-                return; // playlist exhausted: let the current track play out.
+                return;
             }
             q.remove(0)
         };
