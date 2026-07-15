@@ -1,8 +1,6 @@
 use crate::streamer::mixer::{Mixer, MixerHandle};
 use crate::streamer::utils::{f_fadein_linear, f_fadein_log, f_fadeout_linear, f_fadeout_log};
-use crate::streamer::{
-    Callback, ControlCommand, ControlHandle, StreamErr, Streamer, StreamerCallBackHandle,
-};
+use crate::streamer::{Callback, ControlCommand, ControlHandle, StreamErr, Streamer, StreamerCallBackHandle, StreamerCallbackShared};
 use async_broadcast::Receiver;
 use crossbeam_channel::Sender;
 use std::collections::HashMap;
@@ -27,6 +25,7 @@ pub struct PlayListStreamer {
     sync_tx: Option<Sender<usize>>,
     callback_receiver: Option<Receiver<Callback>>,
     command_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
+    callback_handle: Arc<Mutex<StreamerCallbackShared>>,
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
     cross_fade_type: CrossFadeType,
 }
@@ -34,6 +33,11 @@ pub struct PlayListStreamer {
 impl PlayListStreamer {
     pub fn new(streamers: Vec<Box<dyn Streamer>>, cross_fade_type: CrossFadeType) -> Self {
         let (control, control_rx) = ControlHandle::new();
+        let callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let sample_rate = streamers.first().map_or(0, |s| s.get_input_sample_rate());
+        let channel_count = streamers
+            .first()
+            .map_or(0, |s| s.get_input_channel_count() as u32);
         Self {
             streamers: Arc::new(Mutex::new(streamers)),
             cross_fade_type,
@@ -42,7 +46,14 @@ impl PlayListStreamer {
             sync_tx: None,
             callback_receiver: None,
             command_rx: None,
-            callbacks: Arc::new(Mutex::new(HashMap::new())),
+            callback_handle: Arc::new(Mutex::new(StreamerCallbackShared {
+                sample_rate,
+                channel_count,
+                callback_register: None,
+                pending_callbacks: Arc::new(Mutex::new(vec![])),
+                callbacks: callbacks.clone(),
+            })),
+            callbacks,
         }
     }
 }
@@ -55,7 +66,7 @@ fn loop_no_crossfade(
 ) {
     let current = {
         let mut streamers = streamer_queue.lock().unwrap();
-        if streamers.len() == 0 {
+        if streamers.is_empty() {
             return;
         }
         streamers.remove(0)
@@ -139,6 +150,16 @@ impl Streamer for PlayListStreamer {
             return thread::spawn(move || Ok(()));
         }
 
+        self.callback_receiver = Some(callback_receiver.clone());
+        {
+            let mut h =self.callback_handle.lock().unwrap();
+            h.callback_register = Some(callback_register.clone());
+            let pending_callbacks = h.pending_callbacks.lock().unwrap();
+            pending_callbacks.iter().for_each(|callback_time| {
+                callback_register.send(*callback_time).unwrap();
+            });
+        }
+
         // Fade duration in whole seconds; 0 means "no crossfade".
         let fade_secs = match self.cross_fade_type {
             CrossFadeType::Linear(f) | CrossFadeType::Logarithmic(f) => f as u64,
@@ -146,8 +167,6 @@ impl Streamer for PlayListStreamer {
         };
         let first_dur = streamers.lock().unwrap()[0].get_duration();
 
-        // No crossfade requested, or the first track's length is unknown (can't
-        // schedule a cutoff): fall back to gapless sequential playback.
         if fade_secs == 0 || first_dur.is_none() {
             return thread::spawn(move || {
                 loop_no_crossfade(
@@ -178,8 +197,6 @@ impl Streamer for PlayListStreamer {
             fade_samples,
         });
 
-        // First crossfade fires `fade_secs` before the first track ends. This is
-        // registered before play() and flushed from pending_callbacks on start.
         let cutoff = first_dur.unwrap().saturating_sub(fade_secs);
         schedule_crossfade(ctx, first_control, cutoff);
 
@@ -203,7 +220,9 @@ impl Streamer for PlayListStreamer {
     }
 
     fn get_callback_handle(&self) -> StreamerCallBackHandle {
-        todo!()
+        StreamerCallBackHandle {
+            shared: self.callback_handle.clone(),
+        }
     }
 
     fn control_handle(&self) -> ControlHandle {

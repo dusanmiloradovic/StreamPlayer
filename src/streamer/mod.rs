@@ -48,6 +48,7 @@ pub struct StreamerCallBackHandle{
     shared:Arc<Mutex<StreamerCallbackShared>>,
 }
 
+//TODO move all the callback logic here, including with the receiving 
 impl StreamerCallbackShared {
 
     pub fn add_callback(&self, after: Duration, callback: Box<dyn Fn() + Send>) -> Result<(), StreamerAddError>{

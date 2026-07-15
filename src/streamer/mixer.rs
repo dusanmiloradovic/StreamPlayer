@@ -120,10 +120,6 @@ impl Mixer {
             .map(|x| Arc::new(AtomicU32::new(x)))
             .collect();
         let callbacks = Arc::new(Mutex::new(HashMap::new()));
-        // Mirror SingleStreamer: seed the callback handle with real sample_rate /
-        // channel_count at construction time so add_callback computes a correct
-        // sample key even before play() runs. Fall back to 0 for an empty mixer;
-        // play() patches the real values in once streamers exist.
         let sample_rate = streamers.first().map_or(0, |s| s.get_input_sample_rate());
         let channel_count = streamers
             .first()
@@ -307,10 +303,7 @@ impl MixerHandle {
             tx.send(MixerCommand::Stop(ch_no)).unwrap_or(());
         }
     }
-
-    /// Schedules `cb` to run once playback reaches `after` (measured from the
-    /// start of the stream). Delegates to the same callback machinery as
-    /// `add_callback`, so it works before or after `play()` has started.
+    
     pub fn schedule_callback(
         &self,
         after: Duration,
