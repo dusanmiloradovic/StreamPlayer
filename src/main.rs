@@ -23,8 +23,10 @@ fn run_playlist(){
     let s3= SingleStreamer::new(Box::new(f3),"audio/mpeg".to_string()).unwrap();
     let streamers: Vec<Box<dyn Streamer>> = vec![Box::new(s1), Box::new(s2), Box::new(s3)];
     let playList = PlayListStreamer::new(streamers, CrossFadeType::Linear(20f32));
+    let callback_handle  = playList.get_callback_handle();
     let mut player = stream_player::new_stream_player(Box::new(playList)).unwrap();
     let handle = player.start().unwrap();
+    callback_handle.add_callback(Duration::from_secs(10), Box::new(|| println!("Callback from playlist!"))).unwrap();
     handle.join().unwrap();
 }
 fn run_mixer() {

@@ -1,5 +1,5 @@
 use crate::streamer::mixer::{Mixer, MixerHandle};
-use crate::streamer::utils::{f_fadein_linear, f_fadein_log, f_fadeout_linear, f_fadeout_log};
+use crate::streamer::utils::{execute_callback, f_fadein_linear, f_fadein_log, f_fadeout_linear, f_fadeout_log};
 use crate::streamer::{Callback, ControlCommand, ControlHandle, StreamErr, Streamer, StreamerCallBackHandle, StreamerCallbackShared};
 use async_broadcast::Receiver;
 use crossbeam_channel::Sender;
@@ -160,6 +160,13 @@ impl Streamer for PlayListStreamer {
             });
         }
 
+        let callbacks = self.callbacks.clone();
+        let mut cbr = callback_receiver.clone();
+        thread::spawn(move || {
+            while let Ok(Callback::CbOnSample(callback_time)) = cbr.recv_blocking() {
+                execute_callback(&callbacks, callback_time);
+            }
+        });
         // Fade duration in whole seconds; 0 means "no crossfade".
         let fade_secs = match self.cross_fade_type {
             CrossFadeType::Linear(f) | CrossFadeType::Logarithmic(f) => f as u64,
