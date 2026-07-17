@@ -14,19 +14,32 @@ fn main() {
     //handle.join().unwrap();
 }
 
-fn run_playlist(){
-    let f3 =  File::open("./files/well-tempered-clavier-1.mp3").unwrap();
+fn run_playlist() {
+    let f3 = File::open("./files/well-tempered-clavier-1.mp3").unwrap();
     let f2 = File::open("./files/lost_in_the_city.mp3").unwrap();
     let f1 = File::open("./files/long-audio-5min.mp3").unwrap();
-    let s1= SingleStreamer::new(Box::new(f1),"audio/mpeg".to_string()).unwrap();
-    let s2= SingleStreamer::new(Box::new(f2),"audio/mpeg".to_string()).unwrap();
-    let s3= SingleStreamer::new(Box::new(f3),"audio/mpeg".to_string()).unwrap();
+    let s1 = SingleStreamer::new(Box::new(f1), "audio/mpeg".to_string()).unwrap();
+    let s2 = SingleStreamer::new(Box::new(f2), "audio/mpeg".to_string()).unwrap();
+    let s3 = SingleStreamer::new(Box::new(f3), "audio/mpeg".to_string()).unwrap();
     let streamers: Vec<Box<dyn Streamer>> = vec![Box::new(s1), Box::new(s2), Box::new(s3)];
     let playList = PlayListStreamer::new(streamers, CrossFadeType::Linear(20f32));
-    let callback_handle  = playList.get_callback_handle();
+    let callback_handle = playList.get_callback_handle();
+    let cbh = playList.get_callback_handle();
+
     let mut player = stream_player::new_stream_player(Box::new(playList)).unwrap();
     let handle = player.start().unwrap();
-    callback_handle.add_callback(Duration::from_secs(10), Box::new(|| println!("Callback from playlist!"))).unwrap();
+    callback_handle
+        .add_callback(
+            Duration::from_secs(10),
+            Box::new(move|| {
+                println!("Callback from playlist!");
+                cbh.add_callback(Duration::from_secs(11), Box::new(move|| {
+                    println!("Callback from playlist!");
+
+                })).unwrap();
+            }),
+        )
+        .unwrap();
     handle.join().unwrap();
 }
 fn run_mixer() {
