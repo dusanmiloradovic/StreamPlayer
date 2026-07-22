@@ -10,8 +10,21 @@ use audio_learn::streamer::playlist::{CrossFadeType, PlayListStreamer};
 use audio_learn::streamer::utils::f_fadeout_log;
 
 fn main() {
-    run_playlist();
+   // run_playlist();
     //handle.join().unwrap();
+    check_playlist_different_with_mono()
+}
+
+fn check_playlist_different_with_mono(){
+    let f1 = File::open("./files/lost_in_the_city.mp3").unwrap();
+    let f2= File::open("./files/mono-sample.mp3").unwrap();
+    let s1 = SingleStreamer::new(Box::new(f1), "audio/mpeg".to_string()).unwrap();
+    let s2 = SingleStreamer::new(Box::new(f2), "audio/mpeg".to_string()).unwrap();
+    let streamers: Vec<Box<dyn Streamer>> = vec![Box::new(s1), Box::new(s2)];
+    let play_list = PlayListStreamer::new(streamers, CrossFadeType::Linear(20f32));
+    let mut player = stream_player::new_stream_player(Box::new(play_list)).unwrap();
+    let handle = player.start().unwrap();
+    handle.join().unwrap();
 }
 
 fn run_playlist() {

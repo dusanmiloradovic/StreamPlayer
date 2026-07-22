@@ -48,6 +48,12 @@ enum StreamCommand {
 }
 
 impl StreamPlayerImpl {
+    // TODO currently Streamer player reads the channel count and input sample rate from the underlying streamer.
+    // however unless we have a single streamer object that means its reading from the first available single streamer
+    // pass the optional config (number of channels, min, max supported sample rate)
+    // this will in turn send the config to the streamer on play
+    // so the streamer can abort if config is not supported
+    // and if the number of channels is different we can have a utility to convert the stream in streamer
     fn new(streamer: Box<dyn Streamer + Send>) -> Result<Self, StreamErr> {
         let channels = streamer.get_input_channel_count();
         let input_sample_rate = streamer.get_input_sample_rate();

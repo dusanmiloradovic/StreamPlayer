@@ -8,11 +8,13 @@ use cpal::default_host;
 use cpal::traits::{DeviceTrait, HostTrait};
 use rubato::{Fft, FixedSync, Resampler};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
+use rubato::audioadapter::Adapter;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CodecParameters, DecoderOptions};
 use symphonia::core::errors::Error;
@@ -25,6 +27,18 @@ use symphonia::core::probe::{Hint, ProbeResult};
 use symphonia::core::units::Time;
 
 const CHUNK_SIZE: usize = 1024;
+
+pub trait MediaSourceFactory: Send + Sync {
+    fn open(&self) -> std::io::Result<Box<dyn MediaSource>>;
+}
+
+// if we pass directly the media source, it will keep the file descriptor open
+// and that will be a problemd for playlist
+pub enum StreamerSource{
+    File(PathBuf),
+    Http(String, Vec<(String, String)>),
+    Custom(Arc<dyn MediaSourceFactory>),
+}
 
 pub struct SingleStreamer {
     input_sample_rate: u32,
@@ -135,6 +149,9 @@ impl SingleStreamer {
             .default_output_device()
             .ok_or(StreamErr::NoOutputDevice)?;
 
+        device.supported_output_configs().map_err(|_| StreamErr::QueryOutputDeviceError)?.for_each(|c| {
+            println!("Config: {:#?}", c.channels());
+        });
         let config_range = device
             .supported_output_configs()
             .map_err(|_| StreamErr::QueryOutputDeviceError)?
