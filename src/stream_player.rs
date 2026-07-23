@@ -55,8 +55,9 @@ impl StreamPlayerImpl {
     // so the streamer can abort if config is not supported
     // and if the number of channels is different we can have a utility to convert the stream in streamer
     fn new(streamer: Box<dyn Streamer + Send>) -> Result<Self, StreamErr> {
-        let channels = streamer.get_input_channel_count();
-        let input_sample_rate = streamer.get_input_sample_rate();
+        let input_info = streamer.get_input_info();
+        let channels = input_info.channels;
+        let input_sample_rate = input_info.sample_rate;
         let host = default_host();
         let device = host
             .default_output_device()

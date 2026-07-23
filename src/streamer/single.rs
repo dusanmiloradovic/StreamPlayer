@@ -1,20 +1,21 @@
 use crate::streamer::{
-    Callback, ControlCommand, ControlHandle, StreamErr, Streamer, StreamerCallBackHandle,
-    StreamerCallbackShared,
+    Callback, ControlCommand, ControlHandle, DeviceOutputInfo, StreamErr, Streamer,
+    StreamerCallBackHandle, StreamerCallbackShared, StreamerInputInfo,
 };
 use async_broadcast::Receiver;
 use audioadapter_buffers::direct::InterleavedSlice;
 use cpal::default_host;
 use cpal::traits::{DeviceTrait, HostTrait};
 use rubato::{Fft, FixedSync, Resampler};
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
-use rubato::audioadapter::Adapter;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CodecParameters, DecoderOptions};
 use symphonia::core::errors::Error;
@@ -34,10 +35,22 @@ pub trait MediaSourceFactory: Send + Sync {
 
 // if we pass directly the media source, it will keep the file descriptor open
 // and that will be a problemd for playlist
-pub enum StreamerSource{
+pub enum StreamerSource {
     File(PathBuf),
     Http(String, Vec<(String, String)>),
     Custom(Arc<dyn MediaSourceFactory>),
+}
+
+fn get_media_source_from_stream_source(s: &StreamerSource) -> Box<dyn MediaSource> {
+    if let StreamerSource::File(path) = s {
+        Box::new(File::open(path).unwrap())
+    } else if let StreamerSource::Http(url, headers) = s {
+        panic!("Not implemented");
+    } else if let StreamerSource::Custom(factory) = s {
+        factory.open().unwrap()
+    } else {
+        panic!("Invalid streamer source");
+    }
 }
 
 pub struct SingleStreamer {
@@ -54,6 +67,9 @@ pub struct SingleStreamer {
     callback_receiver: Option<Receiver<Callback>>,
     callback_handle: Arc<Mutex<StreamerCallbackShared>>,
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
+    streamer_input_info: Option<StreamerInputInfo>,
+    streamer_source: StreamerSource,
+    mime_type: String,
 }
 
 // Free function to avoid borrow conflict between self.probe_result.format and other fields.
@@ -78,13 +94,16 @@ fn resample(
             let actual_out_frames = {
                 let chunk = &resampling_buffer[..samples_per_chunk];
                 let input_adapter =
-                    InterleavedSlice::new(chunk, input_channels as usize, CHUNK_SIZE).map_err(|_| StreamErr::ResamplingError)?;
+                    InterleavedSlice::new(chunk, input_channels as usize, CHUNK_SIZE)
+                        .map_err(|_| StreamErr::ResamplingError)?;
                 let mut output_adapter = InterleavedSlice::new_mut(
                     &mut outdata,
                     input_channels as usize,
                     max_out_frames,
-                ).map_err(|_| StreamErr::ResamplingError)?;
-                r.process_into_buffer(&input_adapter, &mut output_adapter, None).map_err(|_| StreamErr::ResamplingError)?
+                )
+                .map_err(|_| StreamErr::ResamplingError)?;
+                r.process_into_buffer(&input_adapter, &mut output_adapter, None)
+                    .map_err(|_| StreamErr::ResamplingError)?
                     .1
             };
             let resampled = &mut outdata[..actual_out_frames * input_channels as usize];
@@ -149,9 +168,12 @@ impl SingleStreamer {
             .default_output_device()
             .ok_or(StreamErr::NoOutputDevice)?;
 
-        device.supported_output_configs().map_err(|_| StreamErr::QueryOutputDeviceError)?.for_each(|c| {
-            println!("Config: {:#?}", c.channels());
-        });
+        device
+            .supported_output_configs()
+            .map_err(|_| StreamErr::QueryOutputDeviceError)?
+            .for_each(|c| {
+                println!("Config: {:#?}", c.channels());
+            });
         let config_range = device
             .supported_output_configs()
             .map_err(|_| StreamErr::QueryOutputDeviceError)?
@@ -344,18 +366,6 @@ impl Streamer for SingleStreamer {
         })
     }
 
-    fn get_input_sample_rate(&self) -> u32 {
-        self.input_sample_rate
-    }
-
-    fn get_input_channel_count(&self) -> u16 {
-        self.channels_size
-    }
-
-    fn get_output_sample_rate(&self) -> u32 {
-        self.output_sample_rate
-    }
-
     fn finished_flag(&self) -> Arc<AtomicBool> {
         self.finished.clone()
     }
@@ -370,7 +380,51 @@ impl Streamer for SingleStreamer {
         self.control.clone()
     }
 
-    fn get_duration(&self) -> Option<u64> {
-        self.duration
+    fn get_input_info(&self) -> Result<Cow<'_, StreamerInputInfo>, StreamErr> {
+        if let Some(input_info) = &self.streamer_input_info {
+            Ok(Cow::Borrowed(input_info))
+        } else {
+            let ms = get_media_source_from_stream_source(&self.streamer_source);
+            let mss = MediaSourceStream::new(ms, Default::default());
+            let mut hint = Hint::new();
+            hint.mime_type(&self.mime_type);
+            let meta_opts: MetadataOptions = Default::default();
+            let fmt_opts: FormatOptions = Default::default();
+
+            let probed = symphonia::default::get_probe()
+                .format(&hint, mss, &fmt_opts, &meta_opts)
+                .map_err(|_| StreamErr::UnsupportedFormat)?;
+
+            let (track_id, sample_rate, channels, codec_params) = {
+                let track = probed
+                    .format
+                    .default_track()
+                    .ok_or(StreamErr::NoAudioTrack)?;
+                let id = track.id;
+                let sr = track
+                    .codec_params
+                    .sample_rate
+                    .ok_or(StreamErr::NoSampleRate)?;
+                let ch = track.codec_params.channels.unwrap().count() as u16;
+                let cp = track.codec_params.clone();
+                (id, sr, ch, cp)
+            };
+            let mut duration = None;
+            if let (Some(tb), Some(n_frames)) = (codec_params.time_base, codec_params.n_frames) {
+                let t = tb.calc_time(n_frames);
+                duration = Some(t.seconds + t.frac.round() as u64);
+            }
+            Ok(Cow::Owned(StreamerInputInfo {
+                track_id,
+                channels,
+                sample_rate,
+                duration,
+                probe_result: Arc::new(probed),
+            }))
+        }
+    }
+
+    fn get_output_info(&self) -> Option<DeviceOutputInfo> {
+        todo!()
     }
 }

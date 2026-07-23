@@ -1,5 +1,5 @@
 use async_broadcast::Receiver;
-use crossbeam_channel::{bounded, Sender};
+use crossbeam_channel::{Sender, bounded};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::{Acquire, Release};
@@ -7,11 +7,13 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
+use std::borrow::Cow;
+use symphonia::core::probe::ProbeResult;
 
 pub mod mixer;
+pub mod playlist;
 pub mod single;
 pub mod utils;
-pub mod playlist;
 
 #[derive(Debug)]
 pub enum StreamErr {
@@ -32,40 +34,42 @@ pub enum StreamErr {
 }
 
 pub struct StreamerCallbackShared {
-    sample_rate:u32,
-    channel_count:u32,
-    callback_register:Option<SyncSender<u64>>,
-    pending_callbacks:Arc<Mutex<Vec<u64>>>,
+    sample_rate: u32,
+    channel_count: u32,
+    callback_register: Option<SyncSender<u64>>,
+    pending_callbacks: Arc<Mutex<Vec<u64>>>,
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
 }
 
 #[derive(Debug)]
-pub enum StreamerAddError{
+pub enum StreamerAddError {
     NoSampleRate,
 }
 
-pub struct StreamerCallBackHandle{
-    shared:Arc<Mutex<StreamerCallbackShared>>,
+pub struct StreamerCallBackHandle {
+    shared: Arc<Mutex<StreamerCallbackShared>>,
 }
 
-//TODO move all the callback logic here, including with the receiving 
+//TODO move all the callback logic here, including with the receiving
 impl StreamerCallbackShared {
-
-    pub fn add_callback(&self, after: Duration, callback: Box<dyn Fn() + Send>) -> Result<(), StreamerAddError>{
+    pub fn add_callback(
+        &self,
+        after: Duration,
+        callback: Box<dyn Fn() + Send>,
+    ) -> Result<(), StreamerAddError> {
         let secs = after.as_secs();
-        let samples =
-            secs * self.sample_rate as u64 * self.channel_count as u64;
-        if samples == 0{
+        let samples = secs * self.sample_rate as u64 * self.channel_count as u64;
+        if samples == 0 {
             return Err(StreamerAddError::NoSampleRate);
         }
         let mut pending_callbacks = self.pending_callbacks.lock().unwrap();
         let mut callbacks = self.callbacks.lock().unwrap();
         callbacks.insert(samples, callback);
-        match &self.callback_register{
-            None=>{
+        match &self.callback_register {
+            None => {
                 pending_callbacks.push(samples);
             }
-            Some(cr)=>{
+            Some(cr) => {
                 cr.send(samples).unwrap();
             }
         }
@@ -74,18 +78,36 @@ impl StreamerCallbackShared {
 }
 
 impl StreamerCallBackHandle {
-    pub fn add_callback(&self, after: Duration, callback: Box<dyn Fn() + Send>) -> Result<(), StreamerAddError>{
+    pub fn add_callback(
+        &self,
+        after: Duration,
+        callback: Box<dyn Fn() + Send>,
+    ) -> Result<(), StreamerAddError> {
         self.shared.lock().unwrap().add_callback(after, callback)
     }
 }
-
 
 pub enum ControlCommand {
     Stop,
     Seek(u64),
     Rewind,
     AddGainFunction(Arc<dyn Fn(usize) -> f32 + Send + Sync>),
-    RemoveGainFunction
+    RemoveGainFunction,
+}
+
+#[derive(Clone)]
+pub struct StreamerInputInfo {
+    track_id: u32,
+    pub(crate) channels: u16,
+    pub(crate) sample_rate: u32,
+    duration: Option<u64>,
+    probe_result: Arc<ProbeResult>, // TODO Check if this will always be available
+}
+
+#[derive(Debug)]
+pub struct DeviceOutputInfo{
+    channels: u16,
+    sample_rate: u32,
 }
 
 #[derive(Clone)]
@@ -143,7 +165,10 @@ impl ControlHandle {
             .map_err(|_| StreamErr::SendError)
     }
 
-    pub fn add_gain_function(&self, function: Arc<dyn Fn(usize) -> f32 + Send + Sync>) -> Result<(), StreamErr> {
+    pub fn add_gain_function(
+        &self,
+        function: Arc<dyn Fn(usize) -> f32 + Send + Sync>,
+    ) -> Result<(), StreamErr> {
         // Arc instead of Box since we can reuse the function between child streams
         self.send(ControlCommand::AddGainFunction(function))
     }
@@ -160,15 +185,14 @@ pub trait Streamer: Send {
         callback_receiver: Receiver<Callback>,
         callback_register: SyncSender<u64>,
     ) -> JoinHandle<Result<(), StreamErr>>;
-    fn get_input_sample_rate(&self) -> u32;
-    fn get_input_channel_count(&self) -> u16;
-    fn get_output_sample_rate(&self) -> u32; // the output sample rate should match the closest supported sample rate, and the stream should be resampled to this rate.
+    fn get_input_info(&self) -> Result<Cow<'_,StreamerInputInfo>,StreamErr>;
+    // TODO *decoded.spec.rate holds always the decoded sample rate, maybe use that as alternative
+    fn get_output_info(&self) -> Option<DeviceOutputInfo>;
     fn finished_flag(&self) -> Arc<AtomicBool>;
     fn get_callback_handle(&self) -> StreamerCallBackHandle;
     /// Cloneable transport-control surface (stop/pause/resume/seek/rewind),
     /// safe to capture in a sample callback.
     fn control_handle(&self) -> ControlHandle;
-    fn get_duration(&self) -> Option<u64>;
 }
 
 #[derive(Clone)]
