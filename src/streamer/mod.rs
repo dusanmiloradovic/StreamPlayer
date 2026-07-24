@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use std::borrow::Cow;
+use symphonia::core::codecs::CodecParameters;
 use symphonia::core::probe::ProbeResult;
 
 pub mod mixer;
@@ -31,6 +32,7 @@ pub enum StreamErr {
     SendError,
     AlreadyPlaying,
     NotPlaying,
+    InputInfoError,
 }
 
 pub struct StreamerCallbackShared {
@@ -102,12 +104,13 @@ pub struct StreamerInputInfo {
     pub(crate) sample_rate: u32,
     duration: Option<u64>,
     probe_result: Arc<ProbeResult>, // TODO Check if this will always be available
+    codec_params: CodecParameters,
 }
 
 #[derive(Debug)]
 pub struct DeviceOutputInfo{
-    channels: u16,
-    sample_rate: u32,
+    pub channels: u16,
+    pub sample_rate: u32,
 }
 
 #[derive(Clone)]
@@ -181,6 +184,7 @@ impl ControlHandle {
 pub trait Streamer: Send {
     fn play(
         &mut self,
+        output_info: DeviceOutputInfo,
         sender: SyncSender<Vec<f32>>,
         callback_receiver: Receiver<Callback>,
         callback_register: SyncSender<u64>,

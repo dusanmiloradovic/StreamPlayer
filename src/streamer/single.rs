@@ -54,22 +54,16 @@ fn get_media_source_from_stream_source(s: &StreamerSource) -> Box<dyn MediaSourc
 }
 
 pub struct SingleStreamer {
-    input_sample_rate: u32,
-    probe_result: Option<ProbeResult>,
-    channels_size: u16,
-    track_id: u32,
-    codec_params: CodecParameters,
-    output_sample_rate: u32,
+    streamer_source: StreamerSource,
+    mime_type: String,
     finished: Arc<AtomicBool>,
-    duration: Option<u64>,
     control: ControlHandle,
     command_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
     callback_receiver: Option<Receiver<Callback>>,
     callback_handle: Arc<Mutex<StreamerCallbackShared>>,
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
     streamer_input_info: Option<StreamerInputInfo>,
-    streamer_source: StreamerSource,
-    mime_type: String,
+    output_info: Option<DeviceOutputInfo>,
 }
 
 // Free function to avoid borrow conflict between self.probe_result.format and other fields.
@@ -137,69 +131,12 @@ fn resample(
 }
 
 impl SingleStreamer {
-    pub fn new(source: Box<dyn MediaSource>, mime_type: String) -> Result<Self, StreamErr> {
-        let mss = MediaSourceStream::new(source, Default::default());
-        let mut hint = Hint::new();
-        hint.mime_type(&mime_type);
-        let meta_opts: MetadataOptions = Default::default();
-        let fmt_opts: FormatOptions = Default::default();
-
-        let probed = symphonia::default::get_probe()
-            .format(&hint, mss, &fmt_opts, &meta_opts)
-            .map_err(|_| StreamErr::UnsupportedFormat)?;
-
-        let (track_id, sample_rate, track_channels_size, codec_params) = {
-            let track = probed
-                .format
-                .default_track()
-                .ok_or(StreamErr::NoAudioTrack)?;
-            let id = track.id;
-            let sr = track
-                .codec_params
-                .sample_rate
-                .ok_or(StreamErr::NoSampleRate)?;
-            let ch = track.codec_params.channels.unwrap().count() as u16;
-            let cp = track.codec_params.clone();
-            (id, sr, ch, cp)
-        };
-
-        let host = default_host();
-        let device = host
-            .default_output_device()
-            .ok_or(StreamErr::NoOutputDevice)?;
-
-        device
-            .supported_output_configs()
-            .map_err(|_| StreamErr::QueryOutputDeviceError)?
-            .for_each(|c| {
-                println!("Config: {:#?}", c.channels());
-            });
-        let config_range = device
-            .supported_output_configs()
-            .map_err(|_| StreamErr::QueryOutputDeviceError)?
-            .find(|c| c.channels() == track_channels_size)
-            .ok_or(StreamErr::NoDeviceConfigForChannelCount)?;
-
-        let closest = sample_rate.clamp(
-            config_range.min_sample_rate(),
-            config_range.max_sample_rate(),
-        );
-        let config_sample_rate = config_range.with_sample_rate(closest).sample_rate();
-        let mut duration = None;
-        if let (Some(tb), Some(n_frames)) = (codec_params.time_base, codec_params.n_frames) {
-            let t = tb.calc_time(n_frames);
-            duration = Some(t.seconds + t.frac.round() as u64);
-        }
-
+    pub fn new(streamer_source: StreamerSource, mime_type: String) -> Result<Self, StreamErr> {
         let callbacks = Arc::new(Mutex::new(HashMap::new()));
         let (control, command_rx) = ControlHandle::new();
         Ok(Self {
-            input_sample_rate: sample_rate,
-            probe_result: Some(probed),
-            channels_size: track_channels_size,
-            track_id,
-            codec_params,
-            output_sample_rate: config_sample_rate,
+            streamer_source,
+            mime_type,
             finished: Arc::new(AtomicBool::new(false)),
             control,
             command_rx: Some(command_rx),
@@ -212,7 +149,8 @@ impl SingleStreamer {
                 pending_callbacks: Arc::new(Mutex::new(vec![])),
                 callbacks: callbacks.clone(),
             })),
-            duration,
+            streamer_input_info: None,
+            output_info: None
         })
     }
 }
@@ -220,11 +158,17 @@ impl SingleStreamer {
 impl Streamer for SingleStreamer {
     fn play(
         &mut self,
+        output_info: DeviceOutputInfo,
         sender: SyncSender<Vec<f32>>,
         mut callback_receiver: Receiver<Callback>,
         callback_register: SyncSender<u64>,
     ) -> JoinHandle<Result<(), StreamErr>> {
-        self.callback_receiver = Some(callback_receiver.clone());
+        let input_info = self.get_input_info();
+        if input_info.is_err(){
+            return thread::spawn(||Err(StreamErr::InputInfoError))
+        }
+        let ii = input_info.unwrap();
+        self.streamer_input_info = Some(*ii);
         {
             let mut h = self.callback_handle.lock().unwrap();
             h.callback_register = Some(callback_register.clone());
@@ -235,18 +179,19 @@ impl Streamer for SingleStreamer {
                     .unwrap_or_else(move |err| println!("err: {}", err));
             });
         }
-
-        let codec_params = self.codec_params.clone();
-        let track_id = self.track_id;
-        let channels_size = self.channels_size;
-        let format = self.probe_result.take().map(|p| p.format);
-        let resampler = if self.output_sample_rate != self.input_sample_rate {
+        //TODO compare also the channel count, and  interleave or drop channels if required
+        let codec_params = ii.codec_params;
+        let track_id = ii.track_id;
+        let channels_size = ii.channels;
+        let prbres = ii.probe_result.clone();
+        let format = prbres.format;
+        let resampler =if output_info.sample_rate != ii.sample_rate {
             Fft::<f32>::new(
-                self.input_sample_rate as usize,
-                self.output_sample_rate as usize,
+                ii.sample_rate as usize,
+                output_info.sample_rate as usize,
                 CHUNK_SIZE,
                 2,
-                self.channels_size as usize,
+                output_info.channels as usize,
                 FixedSync::Input,
             )
             .ok()
@@ -420,6 +365,7 @@ impl Streamer for SingleStreamer {
                 sample_rate,
                 duration,
                 probe_result: Arc::new(probed),
+                codec_params: codec_params,
             }))
         }
     }

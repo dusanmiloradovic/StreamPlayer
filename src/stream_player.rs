@@ -55,6 +55,8 @@ impl StreamPlayerImpl {
     // so the streamer can abort if config is not supported
     // and if the number of channels is different we can have a utility to convert the stream in streamer
     fn new(streamer: Box<dyn Streamer + Send>) -> Result<Self, StreamErr> {
+        // TODO give the option to pass number of channels and sample rate as params, and only
+        // if that is not provided, get the sample rates from streamer
         let input_info = streamer.get_input_info();
         let channels = input_info.channels;
         let input_sample_rate = input_info.sample_rate;
@@ -62,6 +64,12 @@ impl StreamPlayerImpl {
         let device = host
             .default_output_device()
             .ok_or(StreamErr::NoOutputDevice)?;
+        let default_output_config = device.default_output_config().map_err(|_| StreamErr::QueryOutputDeviceError)?;
+        let device_sample_rate = default_output_config.sample_rate();
+        let device_channels = default_output_config.channels();
+        // TODO instead of taking the info from the streamer, take it from the device
+        // Also give the option to the user to pass the sample rate and channels
+        // We can't know upfront everything in case of different sample rates
 
         let config_range = device
             .supported_output_configs()

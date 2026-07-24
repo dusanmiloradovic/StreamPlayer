@@ -67,8 +67,8 @@ fn run_mixer() {
     let mixer = Mixer::new(streamers, weights);
     let mixer_handle = mixer.handle();
     let callback_handle = mixer.get_callback_handle();
-    let sample_rate = mixer.get_output_sample_rate();
-    let channels = mixer.get_input_channel_count() as u32;
+    let sample_rate = mixer.get_output_info().unwrap().sample_rate;
+    let channels = mixer.get_output_info().unwrap().channels as u32;
 
     let durSec = 10;
     let samples_in_10s = (sample_rate * channels * durSec) as usize;
