@@ -19,7 +19,7 @@ use std::thread::JoinHandle;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CodecParameters, DecoderOptions};
 use symphonia::core::errors::Error;
-use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 
 use crate::streamer::utils::execute_callback;
 use symphonia::core::io::{MediaSource, MediaSourceStream};
@@ -64,6 +64,7 @@ pub struct SingleStreamer {
     callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
     streamer_input_info: Option<StreamerInputInfo>,
     output_info: Option<DeviceOutputInfo>,
+    format_reader:Option< Box<dyn FormatReader>>,
 }
 
 // Free function to avoid borrow conflict between self.probe_result.format and other fields.
@@ -167,8 +168,9 @@ impl Streamer for SingleStreamer {
         if input_info.is_err(){
             return thread::spawn(||Err(StreamErr::InputInfoError))
         }
-        let ii = input_info.unwrap();
-        self.streamer_input_info = Some(*ii);
+        let ii = input_info.unwrap().into_owned();
+        let mut format = self.format_reader.take().unwrap();
+      // self.streamer_input_info = Some(ii.into_owned());
         {
             let mut h = self.callback_handle.lock().unwrap();
             h.callback_register = Some(callback_register.clone());
@@ -183,8 +185,7 @@ impl Streamer for SingleStreamer {
         let codec_params = ii.codec_params;
         let track_id = ii.track_id;
         let channels_size = ii.channels;
-        let prbres = ii.probe_result.clone();
-        let format = prbres.format;
+
         let resampler =if output_info.sample_rate != ii.sample_rate {
             Fft::<f32>::new(
                 ii.sample_rate as usize,
@@ -207,7 +208,7 @@ impl Streamer for SingleStreamer {
         let callbacks = self.callbacks.clone();
         thread::spawn(move || -> Result<(), StreamErr> {
             let cmd_rx = cmd_rx.ok_or(StreamErr::AlreadyPlaying)?;
-            let mut format = format.ok_or(StreamErr::AlreadyPlaying)?;
+            //let mut format = format.ok_or(StreamErr::AlreadyPlaying)?;
             let mut resampler = resampler;
             let mut resampling_buffer: Vec<f32> = Vec::new();
             let mut sample_buf = None;
@@ -227,8 +228,11 @@ impl Streamer for SingleStreamer {
                             time: Time::from(time),
                             track_id: None,
                         };
+                        let to = SeekTo::Time { time: Time::from(time), track_id: Some(track_id) };
                         format.seek(SeekMode::Accurate, to).ok();
-                        decoder.reset(); // mandatory after seek
+                        decoder.reset();
+                        resampling_buffer.clear();
+                        resampled_len = 0;
                     }
                     Ok(ControlCommand::Stop) => {
                         finished.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -364,8 +368,7 @@ impl Streamer for SingleStreamer {
                 channels,
                 sample_rate,
                 duration,
-                probe_result: Arc::new(probed),
-                codec_params: codec_params,
+                codec_params,
             }))
         }
     }

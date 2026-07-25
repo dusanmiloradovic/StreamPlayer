@@ -1,8 +1,5 @@
 use crate::streamer::utils::execute_callback;
-use crate::streamer::{
-    Callback, ControlCommand, ControlHandle, StreamErr, Streamer, StreamerAddError,
-    StreamerCallBackHandle, StreamerCallbackShared,
-};
+use crate::streamer::{Callback, ControlCommand, ControlHandle, DeviceOutputInfo, StreamErr, Streamer, StreamerAddError, StreamerCallBackHandle, StreamerCallbackShared};
 use std::time::Duration;
 use async_broadcast::Receiver;
 use crossbeam_channel::{bounded, select, Sender};
@@ -316,6 +313,7 @@ impl MixerHandle {
 impl Streamer for Mixer {
     fn play(
         &mut self,
+        output_info: DeviceOutputInfo,
         sender: SyncSender<Vec<f32>>,
         callback_receiver: Receiver<Callback>,
         callback_register: SyncSender<u64>,
@@ -338,8 +336,8 @@ impl Streamer for Mixer {
 
             let mut callback_handle = self.callback_handle.lock().unwrap();
             callback_handle.callback_register = Some(callback_register.clone());
-            callback_handle.sample_rate = self.get_input_sample_rate();
-            callback_handle.channel_count = self.get_input_channel_count() as u32;
+            callback_handle.sample_rate = output_info.sample_rate;
+            callback_handle.channel_count = output_info.channels as u32;
             let pending_callbacks = callback_handle.pending_callbacks.lock().unwrap();
             pending_callbacks.iter().for_each(|callback_time| {
                 callback_register.send(*callback_time).unwrap();

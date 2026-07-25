@@ -103,7 +103,6 @@ pub struct StreamerInputInfo {
     pub(crate) channels: u16,
     pub(crate) sample_rate: u32,
     duration: Option<u64>,
-    probe_result: Arc<ProbeResult>, // TODO Check if this will always be available
     codec_params: CodecParameters,
 }
 
