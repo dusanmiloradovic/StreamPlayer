@@ -1,19 +1,17 @@
-use async_broadcast::broadcast;
-use crate::streamer::Callback;
 use crate::streamer::Callback::CbOnSample;
+use crate::streamer::{Callback, DeviceOutputInfo};
 use crate::streamer::{StreamErr, Streamer};
+use async_broadcast::broadcast;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{default_host, StreamError, SupportedStreamConfig};
-use ringbuf::{traits::*, HeapRb};
+use cpal::{StreamError, SupportedStreamConfig, default_host};
+use ringbuf::{HeapRb, traits::*};
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 pub struct StreamPlayerImpl {
-    default_sample_rate: u32,
-    channels: u16,
     config: SupportedStreamConfig,
     streamer: Option<Box<dyn Streamer + Send>>,
     paused: Arc<AtomicBool>,
@@ -21,12 +19,14 @@ pub struct StreamPlayerImpl {
     elapsed_samples: Arc<AtomicU64>,
     next_sample_callback: Arc<AtomicU64>,
     sample_callbacks: Arc<Mutex<BTreeSet<u64>>>,
+    device_output_info: DeviceOutputInfo,
 }
 
 pub fn new_stream_player(
     streamer: Box<dyn Streamer + Send>,
+    bit_rate_info: BitRateInfo,
 ) -> Result<StreamPlayerImpl, StreamErr> {
-    StreamPlayerImpl::new(streamer)
+    StreamPlayerImpl::new(streamer, bit_rate_info)
 }
 
 fn push_with_backpressure(producer: &mut ringbuf::HeapProd<f32>, data: &[f32]) {
@@ -47,29 +47,43 @@ enum StreamCommand {
     Stop,
 }
 
+pub enum BitRateInfo {
+    Streamer,
+    DeviceDefault,
+    Manual(u32, u16),
+}
+
 impl StreamPlayerImpl {
-    // TODO currently Streamer player reads the channel count and input sample rate from the underlying streamer.
-    // however unless we have a single streamer object that means its reading from the first available single streamer
-    // pass the optional config (number of channels, min, max supported sample rate)
-    // this will in turn send the config to the streamer on play
-    // so the streamer can abort if config is not supported
-    // and if the number of channels is different we can have a utility to convert the stream in streamer
-    fn new(streamer: Box<dyn Streamer + Send>) -> Result<Self, StreamErr> {
-        // TODO give the option to pass number of channels and sample rate as params, and only
-        // if that is not provided, get the sample rates from streamer
+    fn new(
+        streamer: Box<dyn Streamer + Send>,
+        bit_rate_info: BitRateInfo,
+    ) -> Result<Self, StreamErr> {
         let input_info = streamer.get_input_info();
-        let channels = input_info.channels;
-        let input_sample_rate = input_info.sample_rate;
         let host = default_host();
         let device = host
             .default_output_device()
             .ok_or(StreamErr::NoOutputDevice)?;
-        let default_output_config = device.default_output_config().map_err(|_| StreamErr::QueryOutputDeviceError)?;
-        let device_sample_rate = default_output_config.sample_rate();
-        let device_channels = default_output_config.channels();
-        // TODO instead of taking the info from the streamer, take it from the device
-        // Also give the option to the user to pass the sample rate and channels
-        // We can't know upfront everything in case of different sample rates
+        let default_output_config = device
+            .default_output_config()
+            .map_err(|_| StreamErr::QueryOutputDeviceError)?;
+        let (sample_rate, channels) = match bit_rate_info {
+            BitRateInfo::Manual(sample_rate, channels) => (sample_rate, channels),
+            BitRateInfo::DeviceDefault => (
+                default_output_config.sample_rate(),
+                default_output_config.channels(),
+            ),
+            BitRateInfo::Streamer => {
+                if input_info.is_err() {
+                    (
+                        default_output_config.sample_rate(),
+                        default_output_config.channels(),
+                    )
+                } else {
+                    let ii = input_info?;
+                    (ii.sample_rate, ii.channels)
+                }
+            }
+        };
 
         let config_range = device
             .supported_output_configs()
@@ -77,7 +91,7 @@ impl StreamPlayerImpl {
             .find(|c| c.channels() == channels)
             .ok_or(StreamErr::NoDeviceConfigForChannelCount)?;
 
-        let closest = input_sample_rate.clamp(
+        let closest = sample_rate.clamp(
             config_range.min_sample_rate(),
             config_range.max_sample_rate(),
         );
@@ -85,8 +99,10 @@ impl StreamPlayerImpl {
         let default_sample_rate = config.sample_rate();
 
         Ok(Self {
-            channels,
-            default_sample_rate,
+            device_output_info: DeviceOutputInfo {
+                sample_rate: default_sample_rate,
+                channels,
+            },
             config,
             streamer: Some(streamer),
             paused: Arc::new(AtomicBool::new(false)),
@@ -101,10 +117,11 @@ impl StreamPlayerImpl {
         let (sender, receiver) = mpsc::sync_channel::<Vec<f32>>(8);
 
         let target_latency_secs = 1f32;
-        let raw_size =
-            (self.default_sample_rate as f32 * self.channels as f32 * target_latency_secs) as usize;
+        let raw_size = (self.device_output_info.sample_rate as f32
+            * self.device_output_info.channels as f32
+            * target_latency_secs) as usize;
         let ring_size = raw_size.next_power_of_two();
-        let sample_rate = self.default_sample_rate;
+        let sample_rate = self.device_output_info.sample_rate;
         let (mut producer, mut consumer) = HeapRb::<f32>::new(ring_size).split();
 
         let (command_tx, command_rx) = mpsc::channel::<StreamCommand>();
@@ -136,10 +153,10 @@ impl StreamPlayerImpl {
                 let l = counter.load(Relaxed);
                 if nse != 0 && l >= nse {
                     br_tx.try_broadcast(CbOnSample(nse)).ok();
-                    let b =sample_callbacks.lock().unwrap().pop_first();
-                    if let Some(v)=b{
+                    let b = sample_callbacks.lock().unwrap().pop_first();
+                    if let Some(v) = b {
                         next_sample_callback.store(v, Relaxed);
-                    }else {
+                    } else {
                         next_sample_callback.store(0, Relaxed);
                     }
                 }
@@ -186,9 +203,15 @@ impl StreamPlayerImpl {
             .map_err(|_| StreamErr::OutputStreamError)?;
         stream.play().map_err(|_| StreamErr::OutputStreamError)?;
         let mut streamer = self.streamer.take().expect("start() called twice");
+        let device_output_info = self.device_output_info.clone();
         let handle = thread::spawn(move || {
             if let Err(e) = streamer
-                .play(sender, br_rx.clone(), callback_register_tx)
+                .play(
+                    device_output_info,
+                    sender,
+                    br_rx.clone(),
+                    callback_register_tx,
+                )
                 .join()
                 .unwrap_or(Err(StreamErr::UnknownError))
             {
@@ -226,7 +249,7 @@ impl StreamPlayerImpl {
     pub fn get_play_time_ms(&self) -> f32 {
         let elapsed_samples = self.elapsed_samples.load(Relaxed);
         elapsed_samples as f32
-            / (self.default_sample_rate as f32 * self.channels as f32)
+            / (self.device_output_info.sample_rate as f32 * self.device_output_info.channels as f32)
             * 1000.0
     }
 }

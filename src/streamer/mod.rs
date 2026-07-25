@@ -107,7 +107,7 @@ pub struct StreamerInputInfo {
     codec_params: CodecParameters,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DeviceOutputInfo{
     pub channels: u16,
     pub sample_rate: u32,
