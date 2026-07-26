@@ -4,8 +4,6 @@ use crate::streamer::{
 };
 use async_broadcast::Receiver;
 use audioadapter_buffers::direct::InterleavedSlice;
-use cpal::default_host;
-use cpal::traits::{DeviceTrait, HostTrait};
 use rubato::{Fft, FixedSync, Resampler};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -16,6 +14,7 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
+use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CodecParameters, DecoderOptions};
 use symphonia::core::errors::Error;
@@ -61,10 +60,9 @@ pub struct SingleStreamer {
     command_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
     callback_receiver: Option<Receiver<Callback>>,
     callback_handle: Arc<Mutex<StreamerCallbackShared>>,
-    callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
+    callbacks: Arc<Mutex<HashMap<Duration, Box<dyn Fn() + Send>>>>,
     streamer_input_info: Option<StreamerInputInfo>,
     output_info: Option<DeviceOutputInfo>,
-    format_reader:Option< Box<dyn FormatReader>>,
 }
 
 // Free function to avoid borrow conflict between self.probe_result.format and other fields.
@@ -144,14 +142,57 @@ impl SingleStreamer {
             callback_receiver: None,
             callbacks: callbacks.clone(),
             callback_handle: Arc::new(Mutex::new(StreamerCallbackShared {
-                sample_rate,
-                channel_count: track_channels_size as u32,
                 callback_register: None,
                 pending_callbacks: Arc::new(Mutex::new(vec![])),
                 callbacks: callbacks.clone(),
             })),
             streamer_input_info: None,
-            output_info: None
+            output_info: None,
+        })
+    }
+
+    fn get_probe(&self) -> Result<ProbeResult, StreamErr> {
+        let ms = get_media_source_from_stream_source(&self.streamer_source);
+        let mss = MediaSourceStream::new(ms, Default::default());
+        let mut hint = Hint::new();
+        hint.mime_type(&self.mime_type);
+        let meta_opts: MetadataOptions = Default::default();
+        let fmt_opts: FormatOptions = Default::default();
+
+        let probed = symphonia::default::get_probe()
+            .format(&hint, mss, &fmt_opts, &meta_opts)
+            .map_err(|_| StreamErr::UnsupportedFormat)?;
+        Ok(probed)
+    }
+
+    fn get_input_info_from_probe(
+        probed: &ProbeResult,
+    ) -> Result<StreamerInputInfo, StreamErr> {
+        let (track_id, sample_rate, channels, codec_params) = {
+            let track = probed
+                .format
+                .default_track()
+                .ok_or(StreamErr::NoAudioTrack)?;
+            let id = track.id;
+            let sr = track
+                .codec_params
+                .sample_rate
+                .ok_or(StreamErr::NoSampleRate)?;
+            let ch = track.codec_params.channels.unwrap().count() as u16;
+            let cp = track.codec_params.clone();
+            (id, sr, ch, cp)
+        };
+        let mut duration = None;
+        if let (Some(tb), Some(n_frames)) = (codec_params.time_base, codec_params.n_frames) {
+            let t = tb.calc_time(n_frames);
+            duration = Some(t.seconds + t.frac.round() as u64);
+        }
+        Ok(StreamerInputInfo {
+            track_id,
+            channels,
+            sample_rate,
+            duration,
+            codec_params,
         })
     }
 }
@@ -162,15 +203,20 @@ impl Streamer for SingleStreamer {
         output_info: DeviceOutputInfo,
         sender: SyncSender<Vec<f32>>,
         mut callback_receiver: Receiver<Callback>,
-        callback_register: SyncSender<u64>,
+        callback_register: SyncSender<Duration>,
     ) -> JoinHandle<Result<(), StreamErr>> {
-        let input_info = self.get_input_info();
-        if input_info.is_err(){
-            return thread::spawn(||Err(StreamErr::InputInfoError))
+        
+        let _probed = self.get_probe();
+        if _probed.is_err() {
+            return thread::spawn(move || { return Err(StreamErr::ProbeError);});
         }
-        let ii = input_info.unwrap().into_owned();
-        let mut format = self.format_reader.take().unwrap();
-      // self.streamer_input_info = Some(ii.into_owned());
+        let probed = _probed.unwrap();
+        let _input_info = Self::get_input_info_from_probe(&probed);
+        let mut format =  probed.format;
+        if _input_info.is_err() {
+            return thread::spawn(move || { return Err(StreamErr::InputInfoError);});
+        }
+        let ii = _input_info.unwrap();
         {
             let mut h = self.callback_handle.lock().unwrap();
             h.callback_register = Some(callback_register.clone());
@@ -186,7 +232,7 @@ impl Streamer for SingleStreamer {
         let track_id = ii.track_id;
         let channels_size = ii.channels;
 
-        let resampler =if output_info.sample_rate != ii.sample_rate {
+        let resampler = if output_info.sample_rate != ii.sample_rate {
             Fft::<f32>::new(
                 ii.sample_rate as usize,
                 output_info.sample_rate as usize,
@@ -207,6 +253,7 @@ impl Streamer for SingleStreamer {
 
         let callbacks = self.callbacks.clone();
         thread::spawn(move || -> Result<(), StreamErr> {
+            
             let cmd_rx = cmd_rx.ok_or(StreamErr::AlreadyPlaying)?;
             //let mut format = format.ok_or(StreamErr::AlreadyPlaying)?;
             let mut resampler = resampler;
@@ -228,7 +275,10 @@ impl Streamer for SingleStreamer {
                             time: Time::from(time),
                             track_id: None,
                         };
-                        let to = SeekTo::Time { time: Time::from(time), track_id: Some(track_id) };
+                        let to = SeekTo::Time {
+                            time: Time::from(time),
+                            track_id: Some(track_id),
+                        };
                         format.seek(SeekMode::Accurate, to).ok();
                         decoder.reset();
                         resampling_buffer.clear();
@@ -333,43 +383,10 @@ impl Streamer for SingleStreamer {
         if let Some(input_info) = &self.streamer_input_info {
             Ok(Cow::Borrowed(input_info))
         } else {
-            let ms = get_media_source_from_stream_source(&self.streamer_source);
-            let mss = MediaSourceStream::new(ms, Default::default());
-            let mut hint = Hint::new();
-            hint.mime_type(&self.mime_type);
-            let meta_opts: MetadataOptions = Default::default();
-            let fmt_opts: FormatOptions = Default::default();
-
-            let probed = symphonia::default::get_probe()
-                .format(&hint, mss, &fmt_opts, &meta_opts)
-                .map_err(|_| StreamErr::UnsupportedFormat)?;
-
-            let (track_id, sample_rate, channels, codec_params) = {
-                let track = probed
-                    .format
-                    .default_track()
-                    .ok_or(StreamErr::NoAudioTrack)?;
-                let id = track.id;
-                let sr = track
-                    .codec_params
-                    .sample_rate
-                    .ok_or(StreamErr::NoSampleRate)?;
-                let ch = track.codec_params.channels.unwrap().count() as u16;
-                let cp = track.codec_params.clone();
-                (id, sr, ch, cp)
-            };
-            let mut duration = None;
-            if let (Some(tb), Some(n_frames)) = (codec_params.time_base, codec_params.n_frames) {
-                let t = tb.calc_time(n_frames);
-                duration = Some(t.seconds + t.frac.round() as u64);
-            }
-            Ok(Cow::Owned(StreamerInputInfo {
-                track_id,
-                channels,
-                sample_rate,
-                duration,
-                codec_params,
-            }))
+            let probed = self.get_probe()?;
+            let input_info=
+                Self::get_input_info_from_probe(&probed)?;
+            Ok(Cow::Owned(input_info))
         }
     }
 

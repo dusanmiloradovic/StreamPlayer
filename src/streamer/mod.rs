@@ -33,14 +33,13 @@ pub enum StreamErr {
     AlreadyPlaying,
     NotPlaying,
     InputInfoError,
+    ProbeError,
 }
 
 pub struct StreamerCallbackShared {
-    sample_rate: u32,
-    channel_count: u32,
-    callback_register: Option<SyncSender<u64>>,
-    pending_callbacks: Arc<Mutex<Vec<u64>>>,
-    callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
+    callback_register: Option<SyncSender<Duration>>,
+    pending_callbacks: Arc<Mutex<Vec<Duration>>>,
+    callbacks: Arc<Mutex<HashMap<Duration, Box<dyn Fn() + Send>>>>,
 }
 
 #[derive(Debug)]
@@ -59,20 +58,15 @@ impl StreamerCallbackShared {
         after: Duration,
         callback: Box<dyn Fn() + Send>,
     ) -> Result<(), StreamerAddError> {
-        let secs = after.as_secs();
-        let samples = secs * self.sample_rate as u64 * self.channel_count as u64;
-        if samples == 0 {
-            return Err(StreamerAddError::NoSampleRate);
-        }
         let mut pending_callbacks = self.pending_callbacks.lock().unwrap();
         let mut callbacks = self.callbacks.lock().unwrap();
-        callbacks.insert(samples, callback);
+        callbacks.insert(after, callback);
         match &self.callback_register {
             None => {
-                pending_callbacks.push(samples);
+                pending_callbacks.push(after);
             }
             Some(cr) => {
-                cr.send(samples).unwrap();
+                cr.send(after).unwrap();
             }
         }
         Ok(())
@@ -186,7 +180,7 @@ pub trait Streamer: Send {
         output_info: DeviceOutputInfo,
         sender: SyncSender<Vec<f32>>,
         callback_receiver: Receiver<Callback>,
-        callback_register: SyncSender<u64>,
+        callback_register: SyncSender<Duration>,
     ) -> JoinHandle<Result<(), StreamErr>>;
     fn get_input_info(&self) -> Result<Cow<'_,StreamerInputInfo>,StreamErr>;
     // TODO *decoded.spec.rate holds always the decoded sample rate, maybe use that as alternative
