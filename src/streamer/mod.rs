@@ -1,15 +1,14 @@
-use async_broadcast::Receiver;
 use crossbeam_channel::{Sender, bounded};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::{Acquire, Release};
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use std::borrow::Cow;
 use symphonia::core::codecs::CodecParameters;
-use symphonia::core::probe::ProbeResult;
 
 pub mod mixer;
 pub mod playlist;
@@ -37,9 +36,10 @@ pub enum StreamErr {
 }
 
 pub struct StreamerCallbackShared {
-    callback_register: Option<SyncSender<Duration>>,
+    callback_register: Option<SyncSender<u64>>,
     pending_callbacks: Arc<Mutex<Vec<Duration>>>,
-    callbacks: Arc<Mutex<HashMap<Duration, Box<dyn Fn() + Send>>>>,
+    callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>, //once the streamer starts playing it sends the sample rate, so duration can be calculated
+    device_output_info: Option<DeviceOutputInfo>, // comes from device, used to convert Duration to number of samples
 }
 
 #[derive(Debug)]
@@ -51,8 +51,17 @@ pub struct StreamerCallBackHandle {
     shared: Arc<Mutex<StreamerCallbackShared>>,
 }
 
-//TODO move all the callback logic here, including with the receiving
 impl StreamerCallbackShared {
+    fn convert_duration_to_samples(&self, d:Duration) -> u64 {
+        if self.device_output_info.is_none() {
+            return 0;
+        }
+        let device_output_info = self.device_output_info.unwrap();
+        let sample_rate = device_output_info.sample_rate;
+        let num_samples = (d.as_secs_f64() * sample_rate as f64) as u64;
+        num_samples
+    }
+    // TODO !!!!new
     pub fn add_callback(
         &self,
         after: Duration,
@@ -60,16 +69,36 @@ impl StreamerCallbackShared {
     ) -> Result<(), StreamerAddError> {
         let mut pending_callbacks = self.pending_callbacks.lock().unwrap();
         let mut callbacks = self.callbacks.lock().unwrap();
-        callbacks.insert(after, callback);
+        callbacks.insert(self.convert_duration_to_samples(after), callback);
         match &self.callback_register {
             None => {
                 pending_callbacks.push(after);
             }
             Some(cr) => {
-                cr.send(after).unwrap();
+                cr.send(self.convert_duration_to_samples(after)).unwrap(); //TODO handle this
             }
         }
         Ok(())
+    }
+    pub fn set_callback_receiver(&mut self, mut cr: Receiver<Callback>, device_output_info: DeviceOutputInfo) {
+        self.device_output_info = Some(device_output_info);
+        // TODO !!! Here, convert all pending callbacks to callbacks, and register them in stream player
+        let callbacks = Arc::clone(&self.callbacks);
+       thread::spawn(move || {
+           while let cbr = cr.recv() {
+               match cbr {
+                   Ok(Callback::CbOnSample(cb_time)) => {
+                       let mut cbs = callbacks.lock().unwrap();
+                       let cb=cbs.remove(cb_time);
+                       if let Some(cb) = cb {
+                           cb();
+                       }
+                   },
+                   Err(_) => {} //TODO analyze when this can happen and how to handle error
+               }
+           }
+       });
+
     }
 }
 
@@ -100,7 +129,7 @@ pub struct StreamerInputInfo {
     codec_params: CodecParameters,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct DeviceOutputInfo{
     pub channels: u16,
     pub sample_rate: u32,

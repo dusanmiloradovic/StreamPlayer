@@ -1,22 +1,4 @@
-use std::collections::HashMap;
-use std::sync::Mutex;
-
-pub fn execute_callback(
-    callbacks: &Mutex<HashMap<u64, Box<dyn Fn() + Send>>>,
-    callback_time: u64,
-) {
-    // Take the callback out and release the lock BEFORE invoking it. Callbacks
-    // are one-shot, and a callback may itself call `add_callback` (which locks
-    // this same map) to schedule the next one — holding the lock across `cb()`
-    // would deadlock.
-    let cb = callbacks.lock().unwrap().remove(&callback_time);
-    if let Some(cb) = cb {
-        cb();
-    }
-}
-
-
-pub fn f_fadeout_log(x: usize, cutoff_samples:usize) -> f32 {
+pub fn f_fadeout_log(x: usize, cutoff_samples: usize) -> f32 {
     if x >= cutoff_samples {
         return 0.0;
     }
