@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::{Acquire, Release};
 use std::sync::mpsc::{Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -36,10 +36,10 @@ pub enum StreamErr {
 }
 
 pub struct StreamerCallbackShared {
-    callback_register: Option<SyncSender<u64>>,
-    pending_callbacks: Arc<Mutex<Vec<Duration>>>,
-    callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>, //once the streamer starts playing it sends the sample rate, so duration can be calculated
-    device_output_info: Option<DeviceOutputInfo>, // comes from device, used to convert Duration to number of samples
+    callback_register: Mutex<Option<SyncSender<u64>>>,
+    pending_callbacks: Mutex<Vec<Duration>>,
+    callbacks: Mutex<HashMap<u64, Box<dyn Fn() + Send>>>, //once the streamer starts playing it sends the sample rate, so duration can be calculated
+    device_output_info: Mutex<Option<DeviceOutputInfo>>, // comes from device, used to convert Duration to number of samples
 }
 
 #[derive(Debug)]
@@ -47,21 +47,25 @@ pub enum StreamerAddError {
     NoSampleRate,
 }
 
-pub struct StreamerCallBackHandle {
-    shared: Arc<Mutex<StreamerCallbackShared>>,
-}
-
 impl StreamerCallbackShared {
-    fn convert_duration_to_samples(&self, d:Duration) -> u64 {
-        if self.device_output_info.is_none() {
+    fn convert_duration_to_samples(&self, d: Duration) -> u64 {
+        let do_info = self.device_output_info.lock().unwrap();
+        if do_info.is_none() {
             return 0;
         }
-        let device_output_info = self.device_output_info.unwrap();
+        let device_output_info = do_info.unwrap();
         let sample_rate = device_output_info.sample_rate;
         let num_samples = (d.as_secs_f64() * sample_rate as f64) as u64;
         num_samples
     }
-    // TODO !!!!new
+    pub fn new() -> Self {
+        Self {
+            pending_callbacks: Mutex::new(Vec::new()),
+            callbacks: Mutex::new(HashMap::new()),
+            device_output_info: Mutex::new(None),
+            callback_register: Mutex::new(None),
+        }
+    }
     pub fn add_callback(
         &self,
         after: Duration,
@@ -70,7 +74,8 @@ impl StreamerCallbackShared {
         let mut pending_callbacks = self.pending_callbacks.lock().unwrap();
         let mut callbacks = self.callbacks.lock().unwrap();
         callbacks.insert(self.convert_duration_to_samples(after), callback);
-        match &self.callback_register {
+        let cbr = self.callback_register.lock().unwrap();
+        match &*cbr {
             None => {
                 pending_callbacks.push(after);
             }
@@ -80,36 +85,49 @@ impl StreamerCallbackShared {
         }
         Ok(())
     }
-    pub fn set_callback_receiver(&mut self, mut cr: Receiver<Callback>, device_output_info: DeviceOutputInfo) {
-        self.device_output_info = Some(device_output_info);
-        // TODO !!! Here, convert all pending callbacks to callbacks, and register them in stream player
-        let callbacks = Arc::clone(&self.callbacks);
-       thread::spawn(move || {
-           while let cbr = cr.recv() {
-               match cbr {
-                   Ok(Callback::CbOnSample(cb_time)) => {
-                       let mut cbs = callbacks.lock().unwrap();
-                       let cb=cbs.remove(cb_time);
-                       if let Some(cb) = cb {
-                           cb();
-                       }
-                   },
-                   Err(_) => {} //TODO analyze when this can happen and how to handle error
-               }
-           }
-       });
-
+    pub fn set_callback_receiver(
+        &self,
+        mut cr: Receiver<Callback>,
+        callback_register: SyncSender<u64>,
+        device_output_info: DeviceOutputInfo,
+    ) {
+        *self.device_output_info.lock().unwrap() = Some(device_output_info);
+        {
+            let mut pcl = self.pending_callbacks.lock().unwrap();
+            for after in pcl.iter() {
+                callback_register
+                    .send(self.convert_duration_to_samples(*after))
+                    .unwrap();
+            }
+            pcl.clear();
+        }
+        *self.callback_register.lock().unwrap() = Some(callback_register);
+        thread::spawn(move || {
+            // captures only `cr`; references SHARED directly
+            while let cbr = cr.recv() {
+                match cbr {
+                    Ok(Callback::CbOnSample(cb_time)) => {
+                        let cb = CALLBACK_SHARED.callbacks.lock().unwrap().remove(&cb_time);
+                        if let Some(cb) = cb {
+                            cb();
+                        }
+                    }
+                    Err(_) => {} //TODO analyze when this can happen and how to handle error
+                }
+            }
+        });
     }
 }
 
-impl StreamerCallBackHandle {
-    pub fn add_callback(
-        &self,
-        after: Duration,
-        callback: Box<dyn Fn() + Send>,
-    ) -> Result<(), StreamerAddError> {
-        self.shared.lock().unwrap().add_callback(after, callback)
-    }
+static CALLBACK_SHARED: LazyLock<StreamerCallbackShared> =
+    LazyLock::new(|| StreamerCallbackShared::new());
+
+pub fn add_callback(
+    after: Duration,
+    callback: Box<dyn Fn() + Send>,
+) -> Result<(), StreamerAddError> {
+    CALLBACK_SHARED
+        .add_callback(after, callback)
 }
 
 pub enum ControlCommand {
@@ -130,7 +148,7 @@ pub struct StreamerInputInfo {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct DeviceOutputInfo{
+pub struct DeviceOutputInfo {
     pub channels: u16,
     pub sample_rate: u32,
 }
@@ -208,14 +226,11 @@ pub trait Streamer: Send {
         &mut self,
         output_info: DeviceOutputInfo,
         sender: SyncSender<Vec<f32>>,
-        callback_receiver: Receiver<Callback>,
-        callback_register: SyncSender<Duration>,
     ) -> JoinHandle<Result<(), StreamErr>>;
-    fn get_input_info(&self) -> Result<Cow<'_,StreamerInputInfo>,StreamErr>;
+    fn get_input_info(&self) -> Result<Cow<'_, StreamerInputInfo>, StreamErr>;
     // TODO *decoded.spec.rate holds always the decoded sample rate, maybe use that as alternative
     fn get_output_info(&self) -> Option<DeviceOutputInfo>;
     fn finished_flag(&self) -> Arc<AtomicBool>;
-    fn get_callback_handle(&self) -> StreamerCallBackHandle;
     /// Cloneable transport-control surface (stop/pause/resume/seek/rewind),
     /// safe to capture in a sample callback.
     fn control_handle(&self) -> ControlHandle;

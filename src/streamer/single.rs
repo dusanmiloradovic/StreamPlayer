@@ -1,26 +1,21 @@
 use crate::streamer::{
-    Callback, ControlCommand, ControlHandle, DeviceOutputInfo, StreamErr, Streamer,
-    StreamerCallBackHandle, StreamerCallbackShared, StreamerInputInfo,
+    ControlCommand, ControlHandle, DeviceOutputInfo, StreamErr, Streamer, StreamerInputInfo,
 };
-use async_broadcast::Receiver;
 use audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Resampler};
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{CodecParameters, DecoderOptions};
+use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
+use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 
-use crate::streamer::utils::execute_callback;
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::{Hint, ProbeResult};
@@ -58,9 +53,6 @@ pub struct SingleStreamer {
     finished: Arc<AtomicBool>,
     control: ControlHandle,
     command_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
-    callback_receiver: Option<Receiver<Callback>>,
-    callback_handle: Arc<Mutex<StreamerCallbackShared>>,
-    callbacks: Arc<Mutex<HashMap<Duration, Box<dyn Fn() + Send>>>>,
     streamer_input_info: Option<StreamerInputInfo>,
     output_info: Option<DeviceOutputInfo>,
 }
@@ -131,7 +123,6 @@ fn resample(
 
 impl SingleStreamer {
     pub fn new(streamer_source: StreamerSource, mime_type: String) -> Result<Self, StreamErr> {
-        let callbacks = Arc::new(Mutex::new(HashMap::new()));
         let (control, command_rx) = ControlHandle::new();
         Ok(Self {
             streamer_source,
@@ -139,13 +130,6 @@ impl SingleStreamer {
             finished: Arc::new(AtomicBool::new(false)),
             control,
             command_rx: Some(command_rx),
-            callback_receiver: None,
-            callbacks: callbacks.clone(),
-            callback_handle: Arc::new(Mutex::new(StreamerCallbackShared {
-                callback_register: None,
-                pending_callbacks: Arc::new(Mutex::new(vec![])),
-                callbacks: callbacks.clone(),
-            })),
             streamer_input_info: None,
             output_info: None,
         })
@@ -165,9 +149,7 @@ impl SingleStreamer {
         Ok(probed)
     }
 
-    fn get_input_info_from_probe(
-        probed: &ProbeResult,
-    ) -> Result<StreamerInputInfo, StreamErr> {
+    fn get_input_info_from_probe(probed: &ProbeResult) -> Result<StreamerInputInfo, StreamErr> {
         let (track_id, sample_rate, channels, codec_params) = {
             let track = probed
                 .format
@@ -202,31 +184,22 @@ impl Streamer for SingleStreamer {
         &mut self,
         output_info: DeviceOutputInfo,
         sender: SyncSender<Vec<f32>>,
-        mut callback_receiver: Receiver<Callback>,
-        callback_register: SyncSender<Duration>,
     ) -> JoinHandle<Result<(), StreamErr>> {
-        
         let _probed = self.get_probe();
         if _probed.is_err() {
-            return thread::spawn(move || { return Err(StreamErr::ProbeError);});
+            return thread::spawn(move || {
+                return Err(StreamErr::ProbeError);
+            });
         }
         let probed = _probed.unwrap();
         let _input_info = Self::get_input_info_from_probe(&probed);
-        let mut format =  probed.format;
+        let mut format = probed.format;
         if _input_info.is_err() {
-            return thread::spawn(move || { return Err(StreamErr::InputInfoError);});
-        }
-        let ii = _input_info.unwrap();
-        {
-            let mut h = self.callback_handle.lock().unwrap();
-            h.callback_register = Some(callback_register.clone());
-            let pending_callbacks = h.pending_callbacks.lock().unwrap();
-            pending_callbacks.iter().for_each(|callback_time| {
-                callback_register
-                    .send(*callback_time)
-                    .unwrap_or_else(move |err| println!("err: {}", err));
+            return thread::spawn(move || {
+                return Err(StreamErr::InputInfoError);
             });
         }
+        let ii = _input_info.unwrap();
         //TODO compare also the channel count, and  interleave or drop channels if required
         let codec_params = ii.codec_params;
         let track_id = ii.track_id;
@@ -251,9 +224,7 @@ impl Streamer for SingleStreamer {
         let finished = self.finished.clone();
         let paused = self.control.paused_flag();
 
-        let callbacks = self.callbacks.clone();
         thread::spawn(move || -> Result<(), StreamErr> {
-            
             let cmd_rx = cmd_rx.ok_or(StreamErr::AlreadyPlaying)?;
             //let mut format = format.ok_or(StreamErr::AlreadyPlaying)?;
             let mut resampler = resampler;
@@ -302,12 +273,6 @@ impl Streamer for SingleStreamer {
                         gain_function = None;
                         resampled_len = 0;
                     } // nothing pending, continue
-                    Err(_) => {}
-                }
-                match callback_receiver.try_recv() {
-                    Ok(Callback::CbOnSample(callback_time)) => {
-                        execute_callback(&callbacks, callback_time);
-                    }
                     Err(_) => {}
                 }
 
@@ -369,12 +334,6 @@ impl Streamer for SingleStreamer {
         self.finished.clone()
     }
 
-    fn get_callback_handle(&self) -> StreamerCallBackHandle {
-        StreamerCallBackHandle {
-            shared: self.callback_handle.clone(),
-        }
-    }
-
     fn control_handle(&self) -> ControlHandle {
         self.control.clone()
     }
@@ -384,8 +343,7 @@ impl Streamer for SingleStreamer {
             Ok(Cow::Borrowed(input_info))
         } else {
             let probed = self.get_probe()?;
-            let input_info=
-                Self::get_input_info_from_probe(&probed)?;
+            let input_info = Self::get_input_info_from_probe(&probed)?;
             Ok(Cow::Owned(input_info))
         }
     }
