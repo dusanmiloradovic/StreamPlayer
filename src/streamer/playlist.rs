@@ -1,6 +1,9 @@
 use crate::streamer::mixer::{Mixer, MixerHandle};
-use crate::streamer::utils::{ f_fadein_linear, f_fadein_log, f_fadeout_linear, f_fadeout_log};
-use crate::streamer::{ControlCommand, ControlHandle, DeviceOutputInfo, StreamErr, Streamer, StreamerCallBackHandle, StreamerInputInfo, add_callback};
+use crate::streamer::utils::{f_fadein_linear, f_fadein_log, f_fadeout_linear, f_fadeout_log};
+use crate::streamer::{
+    ControlCommand, ControlHandle, DeviceOutputInfo, StreamErr, Streamer,
+    StreamerInputInfo, add_callback,
+};
 use crossbeam_channel::Sender;
 use std::borrow::Cow;
 use std::sync::atomic::AtomicBool;
@@ -36,7 +39,6 @@ impl PlayListStreamer {
             control_rx: Some(control_rx),
             sync_tx: None,
             command_rx: None,
-
         }
     }
 }
@@ -45,7 +47,6 @@ fn loop_no_crossfade(
     streamer_queue: Arc<Mutex<Vec<Box<dyn Streamer>>>>,
     sender: SyncSender<Vec<f32>>,
     device_output_info: DeviceOutputInfo,
-
 ) {
     let current = {
         let mut streamers = streamer_queue.lock().unwrap();
@@ -58,17 +59,13 @@ fn loop_no_crossfade(
     let sender_clone = sender.clone();
     let inital_streamers = vec![current];
     let mut mixer = Mixer::new(inital_streamers, vec![1]);
-    let mixer_thread = mixer.play(device_output_info,sender);
+    let mixer_thread = mixer.play(device_output_info, sender);
     if let Err(some) = mixer_thread.join().unwrap() {
         println!("Error: {:?}", some);
         return; // TODO work on the error type return from joinhandle
     }
 
-    loop_no_crossfade(
-        streamer_queue.clone(),
-        sender_clone,
-        device_output_info,
-    )
+    loop_no_crossfade(streamer_queue.clone(), sender_clone, device_output_info)
 }
 
 type FadeFn = Arc<dyn Fn(usize) -> f32 + Send + Sync>;
@@ -133,23 +130,19 @@ impl Streamer for PlayListStreamer {
             CrossFadeType::Linear(f) | CrossFadeType::Logarithmic(f) => f as u64,
             CrossFadeType::None => 0,
         };
-        //TODO !!!! verify is this is available at this time
-        // check the single.rs again, but I see that the input info is available only after play
+
         let first_dur = streamers.lock().unwrap()[0].get_duration();
 
         if fade_secs == 0 || first_dur.is_none() {
             return thread::spawn(move || {
-                loop_no_crossfade(
-                    streamers.clone(),
-                    sender.clone(),
-                    output_info,
-                );
+                loop_no_crossfade(streamers.clone(), sender.clone(), output_info);
                 Ok(())
             });
         }
 
         let first = streamers.lock().unwrap().remove(0);
-        let fade_samples = channels as usize * out_rate as usize * fade_secs as usize;
+        let fade_samples =
+            output_info.channels as usize * output_info.sample_rate as usize * fade_secs as usize;
         let first_control = first.control_handle();
 
         let mut mixer = Mixer::new(vec![first], vec![1]);
@@ -167,7 +160,7 @@ impl Streamer for PlayListStreamer {
         let cutoff = first_dur.unwrap().saturating_sub(fade_secs);
         schedule_crossfade(ctx, first_control, cutoff);
 
-        mixer.play(output_info,sender)
+        mixer.play(output_info, sender)
     }
 
     fn get_input_info(&self) -> Result<Cow<'_, StreamerInputInfo>, StreamErr> {
@@ -177,7 +170,6 @@ impl Streamer for PlayListStreamer {
     fn get_output_info(&self) -> Option<DeviceOutputInfo> {
         todo!()
     }
-
 
     fn finished_flag(&self) -> Arc<AtomicBool> {
         todo!()
