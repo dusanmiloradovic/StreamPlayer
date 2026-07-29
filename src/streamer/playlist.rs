@@ -1,9 +1,8 @@
 use crate::streamer::mixer::{Mixer, MixerHandle};
-use crate::streamer::utils::{execute_callback, f_fadein_linear, f_fadein_log, f_fadeout_linear, f_fadeout_log};
-use crate::streamer::{Callback, ControlCommand, ControlHandle, StreamErr, Streamer, StreamerCallBackHandle, StreamerCallbackShared};
-use async_broadcast::Receiver;
+use crate::streamer::utils::{ f_fadein_linear, f_fadein_log, f_fadeout_linear, f_fadeout_log};
+use crate::streamer::{ControlCommand, ControlHandle, DeviceOutputInfo, StreamErr, Streamer, StreamerCallBackHandle, StreamerInputInfo, add_callback};
 use crossbeam_channel::Sender;
-use std::collections::HashMap;
+use std::borrow::Cow;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
@@ -23,37 +22,21 @@ pub struct PlayListStreamer {
     control: ControlHandle,
     control_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
     sync_tx: Option<Sender<usize>>,
-    callback_receiver: Option<Receiver<Callback>>,
     command_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
-    callback_handle: Arc<Mutex<StreamerCallbackShared>>,
-    callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
     cross_fade_type: CrossFadeType,
 }
 
 impl PlayListStreamer {
     pub fn new(streamers: Vec<Box<dyn Streamer>>, cross_fade_type: CrossFadeType) -> Self {
         let (control, control_rx) = ControlHandle::new();
-        let callbacks = Arc::new(Mutex::new(HashMap::new()));
-        let sample_rate = streamers.first().map_or(0, |s| s.get_input_sample_rate());
-        let channel_count = streamers
-            .first()
-            .map_or(0, |s| s.get_input_channel_count() as u32);
         Self {
             streamers: Arc::new(Mutex::new(streamers)),
             cross_fade_type,
             control,
             control_rx: Some(control_rx),
             sync_tx: None,
-            callback_receiver: None,
             command_rx: None,
-            callback_handle: Arc::new(Mutex::new(StreamerCallbackShared {
-                sample_rate,
-                channel_count,
-                callback_register: None,
-                pending_callbacks: Arc::new(Mutex::new(vec![])),
-                callbacks: callbacks.clone(),
-            })),
-            callbacks,
+
         }
     }
 }
@@ -61,8 +44,8 @@ impl PlayListStreamer {
 fn loop_no_crossfade(
     streamer_queue: Arc<Mutex<Vec<Box<dyn Streamer>>>>,
     sender: SyncSender<Vec<f32>>,
-    callback_receiver: Receiver<Callback>,
-    callback_register: SyncSender<u64>,
+    device_output_info: DeviceOutputInfo,
+
 ) {
     let current = {
         let mut streamers = streamer_queue.lock().unwrap();
@@ -73,11 +56,9 @@ fn loop_no_crossfade(
     };
 
     let sender_clone = sender.clone();
-    let callback_receiver_clone = callback_receiver.clone();
-    let callback_register_clone = callback_register.clone();
     let inital_streamers = vec![current];
     let mut mixer = Mixer::new(inital_streamers, vec![1]);
-    let mixer_thread = mixer.play(sender, callback_receiver, callback_register);
+    let mixer_thread = mixer.play(device_output_info,sender);
     if let Err(some) = mixer_thread.join().unwrap() {
         println!("Error: {:?}", some);
         return; // TODO work on the error type return from joinhandle
@@ -86,8 +67,7 @@ fn loop_no_crossfade(
     loop_no_crossfade(
         streamer_queue.clone(),
         sender_clone,
-        callback_receiver_clone,
-        callback_register_clone,
+        device_output_info,
     )
 }
 
@@ -135,43 +115,26 @@ fn schedule_crossfade(ctx: Arc<CrossfadeCtx>, outgoing_control: ControlHandle, c
             schedule_crossfade(ctx_cb.clone(), next_control, next_cutoff);
         }
     });
-    let _ = ctx.handle.schedule_callback(Duration::from_secs(cutoff_secs), cb);
+    let _ = add_callback(Duration::from_secs(cutoff_secs), cb);
 }
 
 impl Streamer for PlayListStreamer {
     fn play(
         &mut self,
+        output_info: DeviceOutputInfo,
         sender: SyncSender<Vec<f32>>,
-        callback_receiver: Receiver<Callback>,
-        callback_register: SyncSender<u64>,
     ) -> JoinHandle<Result<(), StreamErr>> {
         let streamers = self.streamers.clone();
         if streamers.lock().unwrap().is_empty() {
             return thread::spawn(move || Ok(()));
         }
-
-        self.callback_receiver = Some(callback_receiver.clone());
-        {
-            let mut h =self.callback_handle.lock().unwrap();
-            h.callback_register = Some(callback_register.clone());
-            let pending_callbacks = h.pending_callbacks.lock().unwrap();
-            pending_callbacks.iter().for_each(|callback_time| {
-                callback_register.send(*callback_time).unwrap();
-            });
-        }
-
-        let callbacks = self.callbacks.clone();
-        let mut cbr = callback_receiver.clone();
-        thread::spawn(move || {
-            while let Ok(Callback::CbOnSample(callback_time)) = cbr.recv_blocking() {
-                execute_callback(&callbacks, callback_time);
-            }
-        });
         // Fade duration in whole seconds; 0 means "no crossfade".
         let fade_secs = match self.cross_fade_type {
             CrossFadeType::Linear(f) | CrossFadeType::Logarithmic(f) => f as u64,
             CrossFadeType::None => 0,
         };
+        //TODO !!!! verify is this is available at this time
+        // check the single.rs again, but I see that the input info is available only after play
         let first_dur = streamers.lock().unwrap()[0].get_duration();
 
         if fade_secs == 0 || first_dur.is_none() {
@@ -179,16 +142,13 @@ impl Streamer for PlayListStreamer {
                 loop_no_crossfade(
                     streamers.clone(),
                     sender.clone(),
-                    callback_receiver,
-                    callback_register,
+                    output_info,
                 );
                 Ok(())
             });
         }
 
         let first = streamers.lock().unwrap().remove(0);
-        let channels = first.get_input_channel_count();
-        let out_rate = first.get_output_sample_rate();
         let fade_samples = channels as usize * out_rate as usize * fade_secs as usize;
         let first_control = first.control_handle();
 
@@ -207,29 +167,20 @@ impl Streamer for PlayListStreamer {
         let cutoff = first_dur.unwrap().saturating_sub(fade_secs);
         schedule_crossfade(ctx, first_control, cutoff);
 
-        mixer.play(sender, callback_receiver, callback_register)
+        mixer.play(output_info,sender)
     }
 
-    fn get_input_sample_rate(&self) -> u32 {
-        self.streamers.lock().unwrap()[0].get_input_sample_rate()
-    }
-
-    fn get_input_channel_count(&self) -> u16 {
-        self.streamers.lock().unwrap()[0].get_input_channel_count()
-    }
-
-    fn get_output_sample_rate(&self) -> u32 {
-        self.streamers.lock().unwrap()[0].get_output_sample_rate()
-    }
-
-    fn finished_flag(&self) -> Arc<AtomicBool> {
+    fn get_input_info(&self) -> Result<Cow<'_, StreamerInputInfo>, StreamErr> {
         todo!()
     }
 
-    fn get_callback_handle(&self) -> StreamerCallBackHandle {
-        StreamerCallBackHandle {
-            shared: self.callback_handle.clone(),
-        }
+    fn get_output_info(&self) -> Option<DeviceOutputInfo> {
+        todo!()
+    }
+
+
+    fn finished_flag(&self) -> Arc<AtomicBool> {
+        todo!()
     }
 
     fn control_handle(&self) -> ControlHandle {

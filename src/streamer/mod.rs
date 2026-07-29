@@ -234,6 +234,7 @@ pub trait Streamer: Send {
     /// Cloneable transport-control surface (stop/pause/resume/seek/rewind),
     /// safe to capture in a sample callback.
     fn control_handle(&self) -> ControlHandle;
+    fn get_duration(&self) -> Option<u64>;
 }
 
 #[derive(Clone)]

@@ -6,9 +6,9 @@ use rubato::{Fft, FixedSync, Resampler};
 use std::borrow::Cow;
 use std::fs::File;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::SyncSender;
-use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 use symphonia::core::audio::SampleBuffer;
@@ -185,6 +185,7 @@ impl Streamer for SingleStreamer {
         output_info: DeviceOutputInfo,
         sender: SyncSender<Vec<f32>>,
     ) -> JoinHandle<Result<(), StreamErr>> {
+        self.output_info = Some(output_info.clone());
         let _probed = self.get_probe();
         if _probed.is_err() {
             return thread::spawn(move || {
@@ -200,7 +201,7 @@ impl Streamer for SingleStreamer {
             });
         }
         let ii = _input_info.unwrap();
-        //TODO compare also the channel count, and  interleave or drop channels if required
+        //TODO !!!compare also the channel count, and  interleave or drop channels if required
         let codec_params = ii.codec_params;
         let track_id = ii.track_id;
         let channels_size = ii.channels;
@@ -348,7 +349,16 @@ impl Streamer for SingleStreamer {
         }
     }
 
+    fn get_duration(&self) -> Option<u64> {
+        // TODO this will be moved to the separate handler, see if we can do this, or have only static info
+        let ii =self.get_input_info();
+        if ii.is_err() {
+            return None;
+        }
+        ii.unwrap().duration
+    }
+
     fn get_output_info(&self) -> Option<DeviceOutputInfo> {
-        todo!()
+        self.output_info.clone()
     }
 }

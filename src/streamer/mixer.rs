@@ -1,13 +1,13 @@
-use crate::streamer::utils::execute_callback;
-use crate::streamer::{Callback, ControlCommand, ControlHandle, DeviceOutputInfo, StreamErr, Streamer, StreamerAddError, StreamerCallBackHandle, StreamerCallbackShared};
-use std::time::Duration;
-use async_broadcast::Receiver;
-use crossbeam_channel::{bounded, select, Sender};
-use std::collections::{HashMap, VecDeque};
+use crate::streamer::{ControlCommand, ControlHandle, DeviceOutputInfo, StreamErr, Streamer,
+                      StreamerInputInfo,
+};
+use crossbeam_channel::{Sender, bounded, select};
+use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize};
 use std::sync::mpsc::SyncSender;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
 
@@ -22,10 +22,6 @@ enum MixerCommand {
     },
 }
 
-/// Applies a transport-control command by fanning it out to the mixer's child
-/// streamers. Returns `true` when the mixer should stop. Lives outside the
-/// mixing thread so the `select!` arm and the paused-park loop share one
-/// implementation.
 fn apply_mixer_control(
     cmd: ControlCommand,
     children: &[ControlHandle],
@@ -50,13 +46,13 @@ fn apply_mixer_control(
                 let _ = c.rewind();
             }
             false
-        },
-        ControlCommand::AddGainFunction(gf)=>{
+        }
+        ControlCommand::AddGainFunction(gf) => {
             for c in children {
                 let _ = c.add_gain_function(gf.clone());
             }
             false
-        } ,
+        }
         ControlCommand::RemoveGainFunction => {
             for c in children {
                 let _ = c.remove_gain_function();
@@ -68,6 +64,7 @@ fn apply_mixer_control(
 
 pub struct Mixer {
     streamers: Vec<Box<dyn Streamer>>,
+    device_output_info: Option<DeviceOutputInfo>,
     weights: Vec<Arc<AtomicU32>>,
     finished: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
@@ -81,9 +78,6 @@ pub struct Mixer {
     shared: Arc<Mutex<MixerShared>>,
     control: ControlHandle,
     control_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
-    callback_receiver: Option<Receiver<Callback>>,
-    callback_handle: Arc<Mutex<StreamerCallbackShared>>,
-    callbacks: Arc<Mutex<HashMap<u64, Box<dyn Fn() + Send>>>>,
     // When true, output is averaged by 1/total_weight (safe for simultaneous
     // mixing). When false, channels are summed as-is — used for crossfades,
     // where the per-channel fade gains already sum to ~unity.
@@ -93,8 +87,7 @@ pub struct Mixer {
 struct MixerShared {
     command_tx: Option<Sender<MixerCommand>>,
     sync_sender: Option<Sender<usize>>,
-    callback_register: Option<SyncSender<u64>>,
-    callback_receiver: Option<Receiver<Callback>>,
+    device_output_info: Option<DeviceOutputInfo>,
 }
 
 /// A handle to a `Mixer` that can be retained by the caller after the `Mixer`
@@ -103,7 +96,6 @@ struct MixerShared {
 #[derive(Clone)]
 pub struct MixerHandle {
     shared: Arc<Mutex<MixerShared>>,
-    callback_shared: Arc<Mutex<StreamerCallbackShared>>,
     play_position: Arc<AtomicUsize>,
 }
 
@@ -116,14 +108,11 @@ impl Mixer {
             .into_iter()
             .map(|x| Arc::new(AtomicU32::new(x)))
             .collect();
-        let callbacks = Arc::new(Mutex::new(HashMap::new()));
-        let sample_rate = streamers.first().map_or(0, |s| s.get_input_sample_rate());
-        let channel_count = streamers
-            .first()
-            .map_or(0, |s| s.get_input_channel_count() as u32);
         let (control, control_rx) = ControlHandle::new();
+        let device_output_info = None;
         Self {
             streamers,
+            device_output_info,
             weights,
             finished: Arc::new(AtomicBool::new(false)),
             stopped: Arc::new(AtomicBool::new(false)),
@@ -135,17 +124,7 @@ impl Mixer {
             shared: Arc::new(Mutex::new(MixerShared {
                 command_tx: None,
                 sync_sender: None,
-                callback_register: None,
-                callback_receiver: None,
-            })),
-            callbacks: callbacks.clone(),
-            callback_receiver: None,
-            callback_handle: Arc::new(Mutex::new(StreamerCallbackShared {
-                sample_rate,
-                channel_count,
-                callback_register: None,
-                pending_callbacks: Arc::new(Mutex::new(vec![])),
-                callbacks: callbacks.clone(),
+                device_output_info,
             })),
             normalize_gain: true,
         }
@@ -164,30 +143,13 @@ impl Mixer {
         MixerHandle {
             shared: self.shared.clone(),
             play_position: self.play_position.clone(),
-            callback_shared: self.callback_handle.clone(),
         }
     }
 
     pub fn add(&mut self, streamer: Box<dyn Streamer>, weight: u32, auto_seek: bool) {
         let weight_arc = Arc::new(AtomicU32::new(weight));
 
-        if let Some(cmd_tx) = &self.command_tx {
-            let callback_register = self
-                .shared
-                .lock()
-                .unwrap()
-                .callback_register
-                .as_ref()
-                .unwrap()
-                .clone();
-            let callback_receiver = self
-                .shared
-                .lock()
-                .unwrap()
-                .callback_receiver
-                .as_ref()
-                .unwrap()
-                .clone();
+        if let Some(cmd_tx) = &self.command_tx && self.device_output_info.is_some() {
             Self::add_live(
                 cmd_tx,
                 self.sync_sender.as_ref().unwrap(),
@@ -195,8 +157,7 @@ impl Mixer {
                 streamer,
                 weight_arc.clone(),
                 auto_seek,
-                callback_register,
-                callback_receiver,
+                self.device_output_info.clone().unwrap(),
             );
             self.weights.push(weight_arc);
         } else {
@@ -212,8 +173,7 @@ impl Mixer {
         mut streamer: Box<dyn Streamer>,
         weight_arc: Arc<AtomicU32>,
         auto_seek: bool,
-        callback_register: SyncSender<u64>,
-        callback_receiver: Receiver<Callback>,
+        device_output_info: DeviceOutputInfo,
     ) {
         let current_pos = play_position.load(Relaxed);
         let shared_buf = Arc::new(Mutex::new(VecDeque::new()));
@@ -222,7 +182,7 @@ impl Mixer {
         let control = streamer.control_handle();
 
         let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-        streamer.play(inner_sender, callback_receiver, callback_register);
+        streamer.play(device_output_info, inner_sender);
         if auto_seek {
             //TODO need to get the current position of the player first, and then seek
         }
@@ -274,11 +234,10 @@ impl Mixer {
 impl MixerHandle {
     pub fn add(&self, streamer: Box<dyn Streamer>, weight: u32, auto_seek: bool) {
         let shared = self.shared.lock().unwrap();
-        if let (Some(cmd_tx), Some(sync_sender), Some(callback_register), Some(callback_receiver)) = (
+        if let (Some(cmd_tx), Some(sync_sender), Some(device_output_info)) = (
             &shared.command_tx,
             &shared.sync_sender,
-            &shared.callback_register,
-            &shared.callback_receiver,
+            &shared.device_output_info,
         ) {
             let weight_arc = Arc::new(AtomicU32::new(weight));
             Mixer::add_live(
@@ -288,8 +247,7 @@ impl MixerHandle {
                 streamer,
                 weight_arc,
                 auto_seek,
-                callback_register.clone(),
-                callback_receiver.clone(),
+                device_output_info.clone(),
             );
         }
     }
@@ -300,14 +258,6 @@ impl MixerHandle {
             tx.send(MixerCommand::Stop(ch_no)).unwrap_or(());
         }
     }
-    
-    pub fn schedule_callback(
-        &self,
-        after: Duration,
-        cb: Box<dyn Fn() + Send>,
-    ) -> Result<(), StreamerAddError> {
-        self.callback_shared.lock().unwrap().add_callback(after, cb)
-    }
 }
 
 impl Streamer for Mixer {
@@ -315,12 +265,7 @@ impl Streamer for Mixer {
         &mut self,
         output_info: DeviceOutputInfo,
         sender: SyncSender<Vec<f32>>,
-        callback_receiver: Receiver<Callback>,
-        callback_register: SyncSender<u64>,
     ) -> JoinHandle<Result<(), StreamErr>> {
-        let cbr = callback_register.clone();
-
-        self.callback_receiver = Some(callback_receiver.clone());
         let (sync_sender, sync_receiver) = bounded::<usize>(8);
         let (cmd_tx, cmd_rx) = bounded::<MixerCommand>(4);
         self.command_tx = Some(cmd_tx);
@@ -331,17 +276,6 @@ impl Streamer for Mixer {
             let mut shared = self.shared.lock().unwrap();
             shared.command_tx = self.command_tx.clone();
             shared.sync_sender = self.sync_sender.clone();
-            shared.callback_register = Some(callback_register.clone());
-            shared.callback_receiver = Some(callback_receiver.clone());
-
-            let mut callback_handle = self.callback_handle.lock().unwrap();
-            callback_handle.callback_register = Some(callback_register.clone());
-            callback_handle.sample_rate = output_info.sample_rate;
-            callback_handle.channel_count = output_info.channels as u32;
-            let pending_callbacks = callback_handle.pending_callbacks.lock().unwrap();
-            pending_callbacks.iter().for_each(|callback_time| {
-                callback_register.send(*callback_time).unwrap();
-            });
         }
 
         // These Vecs are owned exclusively by the mixing thread. The Add command
@@ -359,7 +293,7 @@ impl Streamer for Mixer {
             let control = s.control_handle();
 
             let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-            s.play(inner_sender, callback_receiver.clone(), cbr.clone());
+            s.play(output_info, inner_sender);
 
             let ix = index.clone();
             let sb = shared_buf.clone();
@@ -389,14 +323,7 @@ impl Streamer for Mixer {
         let control_rx = self.control_rx.take();
         let play_position = self.play_position.clone();
 
-        let callbacks = self.callbacks.clone();
         let normalize_gain = self.normalize_gain;
-        let mut callback_receiver = callback_receiver;
-        thread::spawn(move || {
-            while let Ok(Callback::CbOnSample(callback_time)) = callback_receiver.recv_blocking() {
-                execute_callback(&callbacks, callback_time);
-            }
-        });
 
         thread::spawn(move || -> Result<(), StreamErr> {
             let control_rx = control_rx.ok_or(StreamErr::AlreadyPlaying)?;
@@ -502,28 +429,17 @@ impl Streamer for Mixer {
             Ok(())
         })
     }
-    
 
-    fn get_input_sample_rate(&self) -> u32 {
-        self.streamers[0].get_input_sample_rate()
+    fn get_input_info(&self) -> Result<Cow<'_, StreamerInputInfo>, StreamErr> {
+        todo!()
     }
 
-    fn get_input_channel_count(&self) -> u16 {
-        self.streamers[0].get_input_channel_count()
-    }
-
-    fn get_output_sample_rate(&self) -> u32 {
-        self.streamers[0].get_output_sample_rate()
+    fn get_output_info(&self) -> Option<DeviceOutputInfo> {
+        todo!()
     }
 
     fn finished_flag(&self) -> Arc<AtomicBool> {
         self.finished.clone()
-    }
-
-    fn get_callback_handle(&self) -> StreamerCallBackHandle {
-        StreamerCallBackHandle {
-            shared: self.callback_handle.clone(),
-        }
     }
 
     fn control_handle(&self) -> ControlHandle {
