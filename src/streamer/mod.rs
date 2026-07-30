@@ -122,6 +122,10 @@ impl StreamerCallbackShared {
 static CALLBACK_SHARED: LazyLock<StreamerCallbackShared> =
     LazyLock::new(|| StreamerCallbackShared::new());
 
+pub (crate) fn callback_shared()->&'static StreamerCallbackShared {
+    &CALLBACK_SHARED
+}
+
 pub fn add_callback(
     after: Duration,
     callback: Box<dyn Fn() + Send>,

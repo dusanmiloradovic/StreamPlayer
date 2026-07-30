@@ -8,6 +8,34 @@ cpal = "0.17.3"
 rubato = "1.0.1"
 audioadapter-buffers = "2.0.0"
 ringbuf = "0.4.8"
-symphonia = {  version ="0.5.5", features = ["all"] }
+symphonia = { version = "0.5.5", default-features = false }
 crossbeam-channel = "0.5.15"
 async-broadcast = "0.7.2"
+
+[features]
+# Default preserves the previous `features = ["all"]` behavior.
+default = ["full"]
+# Every codec and container symphonia supports (desktop / dev).
+full = ["symphonia/all", "symphonia/opt-simd"]
+# Trimmed set for the React Native builds (RN_TODO.md §9). Adjust to taste.
+mobile = [
+    "symphonia/mp3",
+    "symphonia/aac",
+    "symphonia/flac",
+    "symphonia/vorbis",
+    "symphonia/pcm",
+    "symphonia/ogg",
+    "symphonia/isomp4",
+    "symphonia/mkv",
+    "symphonia/wav",
+    "symphonia/opt-simd",
+]
+
+# Size-optimized profile for shipped mobile binaries.
+# cargo build --profile release-mobile --no-default-features --features mobile
+[profile.release-mobile]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

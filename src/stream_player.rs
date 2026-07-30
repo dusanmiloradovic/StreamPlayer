@@ -1,7 +1,6 @@
 use crate::streamer::Callback::CbOnSample;
-use crate::streamer::{Callback, DeviceOutputInfo};
+use crate::streamer::{Callback, DeviceOutputInfo, callback_shared};
 use crate::streamer::{StreamErr, Streamer};
-use async_broadcast::broadcast;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{StreamError, SupportedStreamConfig, default_host};
 use ringbuf::{HeapRb, traits::*};
@@ -126,7 +125,8 @@ impl StreamPlayerImpl {
 
         let (command_tx, command_rx) = mpsc::channel::<StreamCommand>();
         let (callback_register_tx, callback_register_rx) = mpsc::sync_channel::<u64>(8);
-        let (br_tx, br_rx) = broadcast::<Callback>(8);
+        let (callback_sender, callback_receiver) = mpsc::sync_channel::<Callback>(8);
+
         // we use channels in both directions, we need here to register the timings, and
         // the player is responsible for driving the streamers.
         // the streamers themselves are registering the callbacks
@@ -152,7 +152,7 @@ impl StreamPlayerImpl {
                 let nse = next_sample_callback.load(Relaxed);
                 let l = counter.load(Relaxed);
                 if nse != 0 && l >= nse {
-                    br_tx.try_broadcast(CbOnSample(nse)).ok();
+                    callback_sender.send(CbOnSample(nse)).ok();
                     let b = sample_callbacks.lock().unwrap().pop_first();
                     if let Some(v) = b {
                         next_sample_callback.store(v, Relaxed);
@@ -203,15 +203,11 @@ impl StreamPlayerImpl {
             .map_err(|_| StreamErr::OutputStreamError)?;
         stream.play().map_err(|_| StreamErr::OutputStreamError)?;
         let mut streamer = self.streamer.take().expect("start() called twice");
-        let device_output_info = self.device_output_info.clone();
+        let device_output_info = self.device_output_info;
+        callback_shared().set_callback_receiver(callback_receiver, callback_register_tx, device_output_info);
         let handle = thread::spawn(move || {
             if let Err(e) = streamer
-                .play(
-                    device_output_info,
-                    sender,
-                    br_rx.clone(),
-                    callback_register_tx,
-                )
+                .play(device_output_info, sender)
                 .join()
                 .unwrap_or(Err(StreamErr::UnknownError))
             {
