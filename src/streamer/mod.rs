@@ -37,7 +37,7 @@ pub enum StreamErr {
 
 pub struct StreamerCallbackShared {
     callback_register: Mutex<Option<SyncSender<u64>>>,
-    pending_callbacks: Mutex<Vec<Duration>>,
+    pending_callbacks: Mutex<HashMap<Duration, Box<dyn Fn() + Send>>>,
     callbacks: Mutex<HashMap<u64, Box<dyn Fn() + Send>>>, //once the streamer starts playing it sends the sample rate, so duration can be calculated
     device_output_info: Mutex<Option<DeviceOutputInfo>>, // comes from device, used to convert Duration to number of samples
 }
@@ -47,6 +47,12 @@ pub enum StreamerAddError {
     NoSampleRate,
 }
 
+impl Default for StreamerCallbackShared {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StreamerCallbackShared {
     fn convert_duration_to_samples(&self, d: Duration) -> u64 {
         let do_info = self.device_output_info.lock().unwrap();
@@ -54,13 +60,11 @@ impl StreamerCallbackShared {
             return 0;
         }
         let device_output_info = do_info.unwrap();
-        let sample_rate = device_output_info.sample_rate;
-        let num_samples = (d.as_secs_f64() * sample_rate as f64) as u64;
-        num_samples
+        (d.as_secs_f64() * device_output_info.sample_rate as f64 * device_output_info.channels as f64) as u64
     }
     pub fn new() -> Self {
         Self {
-            pending_callbacks: Mutex::new(Vec::new()),
+            pending_callbacks: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(HashMap::new()),
             device_output_info: Mutex::new(None),
             callback_register: Mutex::new(None),
@@ -71,16 +75,18 @@ impl StreamerCallbackShared {
         after: Duration,
         callback: Box<dyn Fn() + Send>,
     ) -> Result<(), StreamerAddError> {
-        let mut pending_callbacks = self.pending_callbacks.lock().unwrap();
-        let mut callbacks = self.callbacks.lock().unwrap();
-        callbacks.insert(self.convert_duration_to_samples(after), callback);
         let cbr = self.callback_register.lock().unwrap();
         match &*cbr {
             None => {
-                pending_callbacks.push(after);
+                let mut pending_callbacks = self.pending_callbacks.lock().unwrap();
+                pending_callbacks.insert(after, callback);
             }
             Some(cr) => {
-                cr.send(self.convert_duration_to_samples(after)).unwrap(); //TODO handle this
+                let mut callbacks = self.callbacks.lock().unwrap();
+                let samples_duration = self.convert_duration_to_samples(after);
+                callbacks.insert(samples_duration, callback);
+                // when there is callback register, there is output info as well (set at streamer), so we can calculate no of samples
+                cr.send(samples_duration).unwrap(); //TODO handle this
             }
         }
         Ok(())
@@ -94,12 +100,12 @@ impl StreamerCallbackShared {
         *self.device_output_info.lock().unwrap() = Some(device_output_info);
         {
             let mut pcl = self.pending_callbacks.lock().unwrap();
-            for after in pcl.iter() {
-                callback_register
-                    .send(self.convert_duration_to_samples(*after))
-                    .unwrap();
+            let mut callbacks = self.callbacks.lock().unwrap();
+            for (key, val) in pcl.drain() {
+                let samples_duration = self.convert_duration_to_samples(key);
+                callbacks.insert(samples_duration, val);
+                callback_register.send(samples_duration).unwrap();
             }
-            pcl.clear();
         }
         *self.callback_register.lock().unwrap() = Some(callback_register);
         thread::spawn(move || {
@@ -122,7 +128,7 @@ impl StreamerCallbackShared {
 static CALLBACK_SHARED: LazyLock<StreamerCallbackShared> =
     LazyLock::new(|| StreamerCallbackShared::new());
 
-pub (crate) fn callback_shared()->&'static StreamerCallbackShared {
+pub(crate) fn callback_shared() -> &'static StreamerCallbackShared {
     &CALLBACK_SHARED
 }
 
@@ -130,8 +136,7 @@ pub fn add_callback(
     after: Duration,
     callback: Box<dyn Fn() + Send>,
 ) -> Result<(), StreamerAddError> {
-    CALLBACK_SHARED
-        .add_callback(after, callback)
+    CALLBACK_SHARED.add_callback(after, callback)
 }
 
 pub enum ControlCommand {
