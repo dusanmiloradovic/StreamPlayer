@@ -1,14 +1,15 @@
-use crate::streamer::Callback::CbOnSample;
-use crate::streamer::{Callback, DeviceOutputInfo, callback_shared};
+use crate::streamer::{callback_shared, Callback, DeviceOutputInfo};
 use crate::streamer::{StreamErr, Streamer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{StreamError, SupportedStreamConfig, default_host};
+use cpal::{default_host, StreamError, SupportedStreamConfig};
 use ringbuf::{HeapRb, traits::*};
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::Duration;
+use crate::streamer::Callback::CbOnSample;
 
 pub struct StreamPlayerImpl {
     config: SupportedStreamConfig,
@@ -137,38 +138,24 @@ impl StreamPlayerImpl {
         // for the ring buffer to drain before signalling the cpal keepalive thread.
         let cmd_sender = self.command_sender.as_ref().unwrap().clone();
         let paused = self.paused.clone();
-        let counter = self.elapsed_samples.clone();
-        let next_sample_callback = self.next_sample_callback.clone();
-        let nse2 = self.next_sample_callback.clone();
-        let sample_callbacks = self.sample_callbacks.clone();
+        let stopped = Arc::new(AtomicBool::new(false));
         thread::spawn(move || {
             while paused.load(Relaxed) {
                 thread::sleep(std::time::Duration::from_millis(10));
                 // on some platforms, stream.pause() is not working (that is a hardware limitation)
             }
             while let Ok(samples) = receiver.recv() {
-                counter.fetch_add(samples.len() as u64, Relaxed);
                 push_with_backpressure(&mut producer, &samples);
-                let nse = next_sample_callback.load(Relaxed);
-                let l = counter.load(Relaxed);
-                if nse != 0 && l >= nse {
-                    callback_sender.send(CbOnSample(nse)).ok();
-                    let b = sample_callbacks.lock().unwrap().pop_first();
-                    if let Some(v) = b {
-                        next_sample_callback.store(v, Relaxed);
-                    } else {
-                        next_sample_callback.store(0, Relaxed);
-                    }
-                }
             }
             let drain_time =
-                std::time::Duration::from_secs_f32(ring_size as f32 / sample_rate as f32);
+                Duration::from_secs_f32(ring_size as f32 / sample_rate as f32);
             thread::sleep(drain_time);
             cmd_sender.send(StreamCommand::Stop).unwrap();
         });
 
         let counter = self.elapsed_samples.clone();
         let sample_callbacks = self.sample_callbacks.clone();
+        let nse2 = self.next_sample_callback.clone();
         thread::spawn(move || {
             while let Ok(callback) = callback_register_rx.recv() {
                 let elapsed_samples = counter.load(Relaxed);
@@ -188,11 +175,36 @@ impl StreamPlayerImpl {
                 }
             }
         });
+        // this is a standalone thread for calling callbacks
+        let counter = self.elapsed_samples.clone();
+        let nse = self.next_sample_callback.clone();
+        let sample_callbacks = self.sample_callbacks.clone();
+        let stp1 = stopped.clone();
+        let paused = self.paused.clone();
+        thread::spawn(move || {
+            while !stp1.load(Relaxed) {
+                let psd = paused.load(Relaxed);
+                if psd {
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                let target = nse.load(Relaxed);
+                if target != 0 && counter.load(Relaxed) >= target {
+                    callback_sender.send(CbOnSample(target)).ok();
+                    let next = sample_callbacks.lock().unwrap().pop_first();
+                    nse.store(next.unwrap_or(0), Relaxed);
+                } else {
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+        });
 
+        let counter = self.elapsed_samples.clone();
         let data_callback = move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
             for sample in out.iter_mut() {
                 *sample = consumer.try_pop().unwrap_or(0.0);
             }
+            counter.fetch_add(out.len() as u64, Relaxed);
         };
         let err_fn = |err: StreamError| eprintln!("stream error: {err}");
         let device = default_host()
@@ -205,6 +217,7 @@ impl StreamPlayerImpl {
         let mut streamer = self.streamer.take().expect("start() called twice");
         let device_output_info = self.device_output_info;
         callback_shared().set_callback_receiver(callback_receiver, callback_register_tx, device_output_info);
+        let stpd = stopped.clone();
         let handle = thread::spawn(move || {
             if let Err(e) = streamer
                 .play(device_output_info, sender)
@@ -213,10 +226,13 @@ impl StreamPlayerImpl {
             {
                 eprintln!("playback error: {e:?}");
             }
+            stpd.store(true,Relaxed);
+
             // sender dropped here → channel closes → consumer thread exits after drain
         });
         let paused = self.paused.clone();
 
+        let stpd = stopped.clone();
         thread::spawn(move || {
             let _stream = stream;
             //holds the stream alive until the stop command is received
@@ -234,6 +250,7 @@ impl StreamPlayerImpl {
                     paused.store(false, Relaxed);
                 }
                 if command == StreamCommand::Stop {
+                    stpd.store(true,Relaxed);
                     break;
                 }
             }
