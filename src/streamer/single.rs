@@ -5,6 +5,7 @@ use audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Resampler};
 use std::borrow::Cow;
 use std::fs::File;
+use std::io::ErrorKind::UnexpectedEof;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -135,9 +136,10 @@ impl SingleStreamer {
         })
     }
 
-    fn get_probe(&self) -> Result<ProbeResult, StreamErr> {
+    fn get_probe(&self) -> Result<(ProbeResult,bool), StreamErr> {
         let ms = get_media_source_from_stream_source(&self.streamer_source);
         let mss = MediaSourceStream::new(ms, Default::default());
+        let seekable = mss.is_seekable();
         let mut hint = Hint::new();
         hint.mime_type(&self.mime_type);
         let meta_opts: MetadataOptions = Default::default();
@@ -146,7 +148,7 @@ impl SingleStreamer {
         let probed = symphonia::default::get_probe()
             .format(&hint, mss, &fmt_opts, &meta_opts)
             .map_err(|_| StreamErr::UnsupportedFormat)?;
-        Ok(probed)
+        Ok((probed,seekable))
     }
 
     fn get_input_info_from_probe(probed: &ProbeResult) -> Result<StreamerInputInfo, StreamErr> {
@@ -192,7 +194,7 @@ impl Streamer for SingleStreamer {
                 return Err(StreamErr::ProbeError);
             });
         }
-        let probed = _probed.unwrap();
+        let (probed,seekable) = _probed.unwrap();
         let _input_info = Self::get_input_info_from_probe(&probed);
         let mut format = probed.format;
         if _input_info.is_err() {
@@ -224,6 +226,8 @@ impl Streamer for SingleStreamer {
 
         let finished = self.finished.clone();
         let paused = self.control.paused_flag();
+        let duration = self.get_duration();
+
 
         thread::spawn(move || -> Result<(), StreamErr> {
             let cmd_rx = cmd_rx.ok_or(StreamErr::AlreadyPlaying)?;
@@ -237,24 +241,56 @@ impl Streamer for SingleStreamer {
                 .map_err(|_| StreamErr::UnsupportedCodec)?;
             let mut gain_function: Option<Arc<dyn Fn(usize) -> f32 + Send>> = None;
             let mut resampled_len: usize = 0;
+
             loop {
                 while paused.load(std::sync::atomic::Ordering::Acquire) {
                     thread::sleep(std::time::Duration::from_millis(10));
                 }
                 match cmd_rx.try_recv() {
                     Ok(ControlCommand::Seek(time)) => {
+                        if duration.is_none() || !seekable {
+                            // TODO current version will support seek only on seekable streams, revisit later
+                            return Err(StreamErr::SeekError);
+                        }
+                        let duration_ts = duration.unwrap();
+                        let target = time.min(duration_ts.saturating_sub(1));
                         let to = SeekTo::Time {
-                            time: Time::from(time),
-                            track_id: None,
-                        };
-                        let to = SeekTo::Time {
-                            time: Time::from(time),
+                            time: Time::from(target),
                             track_id: Some(track_id),
                         };
-                        format.seek(SeekMode::Accurate, to).ok();
-                        decoder.reset();
-                        resampling_buffer.clear();
-                        resampled_len = 0;
+                        match format.seek(SeekMode::Coarse, to) {
+                            Ok(s) => {
+                                decoder.reset();
+                                resampling_buffer.clear();
+                                resampled_len = 0;
+                                //TODO notify streamer of position
+                            } // fine
+                            Err(Error::SeekError(_)) => {
+                                decoder.reset();
+                                resampling_buffer.clear();
+                                resampled_len = 0;
+                                /* position unknown → re-seek if needed */
+                                // TODO get position first somehow (next_packet), and notify streamer
+                            }
+                            Err(Error::IoError(e)) if e.kind() == UnexpectedEof => {
+                                finished.store(true, std::sync::atomic::Ordering::Relaxed);
+                                return Ok(());
+                            }
+                            Err(Error::ResetRequired) => {
+                                decoder.reset(); /* then continue */
+                                //TODO get position
+                            }
+                            Err(Error::IoError(_)) => {
+                                /* real source failure → source is dead, bail/retry */
+                                finished.store(true, std::sync::atomic::Ordering::Relaxed);
+                                return Err(StreamErr::SeekError);
+                            }
+                            Err(_) => {
+                                /* Unsupported/Limit — handle */
+                                finished.store(true, std::sync::atomic::Ordering::Relaxed);
+                                return Err(StreamErr::SeekError);
+                            }
+                        }
                     }
                     Ok(ControlCommand::Stop) => {
                         finished.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -262,7 +298,7 @@ impl Streamer for SingleStreamer {
                     }
                     Ok(ControlCommand::Rewind) => {
                         format
-                            .seek(SeekMode::Accurate, SeekTo::TimeStamp { ts: 0, track_id })
+                            .seek(SeekMode::Coarse, SeekTo::TimeStamp { ts: 0, track_id })
                             .ok();
                         decoder.reset();
                     }
@@ -343,7 +379,7 @@ impl Streamer for SingleStreamer {
         if let Some(input_info) = &self.streamer_input_info {
             Ok(Cow::Borrowed(input_info))
         } else {
-            let probed = self.get_probe()?;
+            let (probed,_) = self.get_probe()?;
             let input_info = Self::get_input_info_from_probe(&probed)?;
             Ok(Cow::Owned(input_info))
         }
@@ -351,7 +387,7 @@ impl Streamer for SingleStreamer {
 
     fn get_duration(&self) -> Option<u64> {
         // TODO this will be moved to the separate handler, see if we can do this, or have only static info
-        let ii =self.get_input_info();
+        let ii = self.get_input_info();
         if ii.is_err() {
             return None;
         }

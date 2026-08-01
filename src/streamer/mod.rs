@@ -33,6 +33,7 @@ pub enum StreamErr {
     NotPlaying,
     InputInfoError,
     ProbeError,
+    SeekError,
 }
 
 pub struct StreamerCallbackShared {
