@@ -23,12 +23,21 @@ fn play_single_streamer() {
     )
     .unwrap();
     let mut player = stream_player::new_stream_player(Box::new(s3), BitRateInfo::Streamer).unwrap();
-    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    let status = player.status(); // cloneable handle: query play time without owning the player
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
     add_callback(
         Duration::from_secs(10),
         Box::new(move || {
-            let ms2 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
-            println!("Callback from single after ,{} seconds",(ms2-ms)/1000);
+            let ms2 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            println!("Callback from single after ,{} seconds", (ms2 - ms) / 1000);
+            let play_time = status.get_play_time_ms();
+            println!("Play time: from player {}", play_time / 1000f32);
             add_callback(
                 Duration::from_secs(15),
                 Box::new(move || {

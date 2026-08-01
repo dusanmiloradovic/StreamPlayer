@@ -259,10 +259,35 @@ impl StreamPlayerImpl {
         Ok(handle)
     }
 
+ 
+    pub fn status(&self) -> PlayerStatus {
+        PlayerStatus {
+            elapsed_samples: self.elapsed_samples.clone(),
+            device_output_info: self.device_output_info,
+        }
+    }
+}
+
+
+#[derive(Clone)]
+pub struct PlayerStatus {
+    elapsed_samples: Arc<AtomicU64>,
+    device_output_info: DeviceOutputInfo,
+}
+
+impl PlayerStatus {
     pub fn get_play_time_ms(&self) -> f32 {
         let elapsed_samples = self.elapsed_samples.load(Relaxed);
         elapsed_samples as f32
             / (self.device_output_info.sample_rate as f32 * self.device_output_info.channels as f32)
             * 1000.0
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.device_output_info.sample_rate
+    }
+
+    pub fn channels(&self) -> u16 {
+        self.device_output_info.channels
     }
 }
