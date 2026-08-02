@@ -5,7 +5,7 @@ use crossbeam_channel::{Sender, bounded, select};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -82,6 +82,7 @@ pub struct Mixer {
     // mixing). When false, channels are summed as-is — used for crossfades,
     // where the per-channel fade gains already sum to ~unity.
     normalize_gain: bool,
+    last_seek_position: Arc<Option<AtomicU64>>,
 }
 
 struct MixerShared {
@@ -127,6 +128,7 @@ impl Mixer {
                 device_output_info,
             })),
             normalize_gain: true,
+            last_seek_position: Arc::new(None),
         }
     }
 
@@ -444,6 +446,10 @@ impl Streamer for Mixer {
 
     fn control_handle(&self) -> ControlHandle {
         self.control.clone()
+    }
+
+    fn last_seek_position(&self) -> Arc<Option<AtomicU64>> {
+        self.last_seek_position.clone()
     }
 
     fn get_duration(&self) -> Option<u64> {

@@ -259,7 +259,7 @@ impl StreamPlayerImpl {
         Ok(handle)
     }
 
- 
+
     pub fn status(&self) -> PlayerStatus {
         PlayerStatus {
             elapsed_samples: self.elapsed_samples.clone(),

@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::ErrorKind::UnexpectedEof;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::mpsc::SyncSender;
 use std::thread;
 use std::thread::JoinHandle;
@@ -56,7 +56,9 @@ pub struct SingleStreamer {
     command_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
     streamer_input_info: Option<StreamerInputInfo>,
     output_info: Option<DeviceOutputInfo>,
+    last_seek_position: Arc<Option<AtomicU64>>,
 }
+
 
 // Free function to avoid borrow conflict between self.probe_result.format and other fields.
 fn resample(
@@ -133,6 +135,7 @@ impl SingleStreamer {
             command_rx: Some(command_rx),
             streamer_input_info: None,
             output_info: None,
+            last_seek_position: Arc::new(None),
         })
     }
 
@@ -396,5 +399,9 @@ impl Streamer for SingleStreamer {
 
     fn get_output_info(&self) -> Option<DeviceOutputInfo> {
         self.output_info.clone()
+    }
+
+    fn last_seek_position(&self) -> Arc<Option<AtomicU64>> {
+        self.last_seek_position.clone()
     }
 }

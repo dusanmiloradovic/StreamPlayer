@@ -1,7 +1,7 @@
 use crossbeam_channel::{Sender, bounded};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::atomic::Ordering::{Acquire, Release};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -245,6 +245,7 @@ pub trait Streamer: Send {
     /// safe to capture in a sample callback.
     fn control_handle(&self) -> ControlHandle;
     fn get_duration(&self) -> Option<u64>;
+    fn last_seek_position(&self) -> Arc<Option<AtomicU64>>;
 }
 
 #[derive(Clone)]

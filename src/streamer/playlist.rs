@@ -6,7 +6,7 @@ use crate::streamer::{
 };
 use crossbeam_channel::Sender;
 use std::borrow::Cow;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -27,6 +27,7 @@ pub struct PlayListStreamer {
     sync_tx: Option<Sender<usize>>,
     command_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
     cross_fade_type: CrossFadeType,
+    last_seek_position: Arc<Option<AtomicU64>>,
 }
 
 impl PlayListStreamer {
@@ -39,6 +40,7 @@ impl PlayListStreamer {
             control_rx: Some(control_rx),
             sync_tx: None,
             command_rx: None,
+            last_seek_position: Arc::new(None),
         }
     }
 }
@@ -177,6 +179,10 @@ impl Streamer for PlayListStreamer {
 
     fn control_handle(&self) -> ControlHandle {
         todo!()
+    }
+
+    fn last_seek_position(&self) -> Arc<Option<AtomicU64>> {
+        self.last_seek_position.clone()
     }
 
     fn get_duration(&self) -> Option<u64> {
