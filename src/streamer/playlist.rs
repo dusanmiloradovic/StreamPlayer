@@ -67,7 +67,7 @@ fn loop_no_crossfade(
         return; // TODO work on the error type return from joinhandle
     }
 
-    loop_no_crossfade(streamer_queue.clone(), sender_clone, device_output_info)
+    loop_no_crossfade(Arc::clone(&streamer_queue), sender_clone, device_output_info)
 }
 
 type FadeFn = Arc<dyn Fn(usize) -> f32 + Send + Sync>;
@@ -94,7 +94,7 @@ struct CrossfadeCtx {
 }
 
 fn schedule_crossfade(ctx: Arc<CrossfadeCtx>, outgoing_control: ControlHandle, cutoff_secs: u64) {
-    let ctx_cb = ctx.clone();
+    let ctx_cb = Arc::clone(&ctx);
     let cb: Box<dyn Fn() + Send> = Box::new(move || {
         let next = {
             let mut q = ctx_cb.queue.lock().unwrap();
@@ -111,7 +111,7 @@ fn schedule_crossfade(ctx: Arc<CrossfadeCtx>, outgoing_control: ControlHandle, c
         ctx_cb.handle.add(next, 1, false);
         if let Some(d) = next_dur {
             let next_cutoff = cutoff_secs + d.saturating_sub(ctx_cb.fade_secs);
-            schedule_crossfade(ctx_cb.clone(), next_control, next_cutoff);
+            schedule_crossfade(Arc::clone(&ctx_cb), next_control, next_cutoff);
         }
     });
     let _ = add_callback(Duration::from_secs(cutoff_secs), cb);
@@ -123,7 +123,7 @@ impl Streamer for PlayListStreamer {
         output_info: DeviceOutputInfo,
         sender: SyncSender<Vec<f32>>,
     ) -> JoinHandle<Result<(), StreamErr>> {
-        let streamers = self.streamers.clone();
+        let streamers = Arc::clone(&self.streamers);
         if streamers.lock().unwrap().is_empty() {
             return thread::spawn(move || Ok(()));
         }
@@ -137,7 +137,7 @@ impl Streamer for PlayListStreamer {
 
         if fade_secs == 0 || first_dur.is_none() {
             return thread::spawn(move || {
-                loop_no_crossfade(streamers.clone(), sender.clone(), output_info);
+                loop_no_crossfade(Arc::clone(&streamers), sender.clone(), output_info);
                 Ok(())
             });
         }
@@ -152,7 +152,7 @@ impl Streamer for PlayListStreamer {
         let handle = mixer.handle();
 
         let ctx = Arc::new(CrossfadeCtx {
-            queue: streamers.clone(),
+            queue: Arc::clone(&streamers),
             handle: handle.clone(),
             fade_type: self.cross_fade_type,
             fade_secs,
@@ -182,7 +182,7 @@ impl Streamer for PlayListStreamer {
     }
 
     fn last_seek_position(&self) -> Arc<Option<AtomicU64>> {
-        self.last_seek_position.clone()
+        Arc::clone(&self.last_seek_position)
     }
 
     fn get_duration(&self) -> Option<u64> {

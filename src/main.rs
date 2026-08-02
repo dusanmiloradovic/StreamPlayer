@@ -138,13 +138,14 @@ fn run_mixer() {
         .unwrap_or_else(|e| println!("Error adding callback: {:?}", e));
 
     let mixer_control = mixer.control_handle();
-    let arc_f = Arc::new(move |x| f_fadeout_log(x, samples_in_10s));
+    let arc_f: Arc<dyn Fn(usize) -> f32 + Send + Sync> =
+        Arc::new(move |x| f_fadeout_log(x, samples_in_10s));
     let mxc = mixer_control.clone();
     //let arcF = arcF.clone();
     add_callback(
         Duration::from_secs(4),
         Box::new(move || {
-            mxc.add_gain_function(arc_f.clone())
+            mxc.add_gain_function(Arc::clone(&arc_f))
                 .expect("TODO: panic message");
             ()
         }),

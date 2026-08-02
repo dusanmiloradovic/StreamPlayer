@@ -20,6 +20,7 @@ pub struct StreamPlayerImpl {
     next_sample_callback: Arc<AtomicU64>,
     sample_callbacks: Arc<Mutex<BTreeSet<u64>>>,
     device_output_info: DeviceOutputInfo,
+    last_seek_position: Arc<Option<AtomicU64>>,
 }
 
 pub fn new_stream_player(
@@ -97,6 +98,7 @@ impl StreamPlayerImpl {
         );
         let config = config_range.with_sample_rate(closest);
         let default_sample_rate = config.sample_rate();
+        let last_seek_position = streamer.last_seek_position();
 
         Ok(Self {
             device_output_info: DeviceOutputInfo {
@@ -110,6 +112,7 @@ impl StreamPlayerImpl {
             elapsed_samples: Arc::new(AtomicU64::new(0)),
             next_sample_callback: Arc::new(AtomicU64::new(0)),
             sample_callbacks: Arc::new(Mutex::new(BTreeSet::new())),
+            last_seek_position,
         })
     }
 
@@ -133,11 +136,12 @@ impl StreamPlayerImpl {
         // the streamers themselves are registering the callbacks
 
         self.command_sender = Some(command_tx);
+        let streamer_last_seek_position = Arc::clone(&self.last_seek_position);
 
         // Drains the channel into the ring buffer; after the channel closes, waits
         // for the ring buffer to drain before signalling the cpal keepalive thread.
         let cmd_sender = self.command_sender.as_ref().unwrap().clone();
-        let paused = self.paused.clone();
+        let paused = Arc::clone(&self.paused);
         let stopped = Arc::new(AtomicBool::new(false));
         thread::spawn(move || {
             while paused.load(Relaxed) {
@@ -153,9 +157,9 @@ impl StreamPlayerImpl {
             cmd_sender.send(StreamCommand::Stop).unwrap();
         });
 
-        let counter = self.elapsed_samples.clone();
-        let sample_callbacks = self.sample_callbacks.clone();
-        let nse2 = self.next_sample_callback.clone();
+        let counter = Arc::clone(&self.elapsed_samples);
+        let sample_callbacks = Arc::clone(&self.sample_callbacks);
+        let nse2 = Arc::clone(&self.next_sample_callback);
         thread::spawn(move || {
             while let Ok(callback) = callback_register_rx.recv() {
                 let elapsed_samples = counter.load(Relaxed);
@@ -176,11 +180,11 @@ impl StreamPlayerImpl {
             }
         });
         // this is a standalone thread for calling callbacks
-        let counter = self.elapsed_samples.clone();
-        let nse = self.next_sample_callback.clone();
-        let sample_callbacks = self.sample_callbacks.clone();
-        let stp1 = stopped.clone();
-        let paused = self.paused.clone();
+        let counter = Arc::clone(&self.elapsed_samples);
+        let nse = Arc::clone(&self.next_sample_callback);
+        let sample_callbacks = Arc::clone(&self.sample_callbacks);
+        let stp1 = Arc::clone(&stopped);
+        let paused = Arc::clone(&self.paused);
         thread::spawn(move || {
             while !stp1.load(Relaxed) {
                 let psd = paused.load(Relaxed);
@@ -199,7 +203,7 @@ impl StreamPlayerImpl {
             }
         });
 
-        let counter = self.elapsed_samples.clone();
+        let counter = Arc::clone(&self.elapsed_samples);
         let data_callback = move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
             for sample in out.iter_mut() {
                 *sample = consumer.try_pop().unwrap_or(0.0);
@@ -217,7 +221,7 @@ impl StreamPlayerImpl {
         let mut streamer = self.streamer.take().expect("start() called twice");
         let device_output_info = self.device_output_info;
         callback_shared().set_callback_receiver(callback_receiver, callback_register_tx, device_output_info);
-        let stpd = stopped.clone();
+        let stpd = Arc::clone(&stopped);
         let handle = thread::spawn(move || {
             if let Err(e) = streamer
                 .play(device_output_info, sender)
@@ -230,9 +234,9 @@ impl StreamPlayerImpl {
 
             // sender dropped here → channel closes → consumer thread exits after drain
         });
-        let paused = self.paused.clone();
+        let paused = Arc::clone(&self.paused);
 
-        let stpd = stopped.clone();
+        let stpd = Arc::clone(&stopped);
         thread::spawn(move || {
             let _stream = stream;
             //holds the stream alive until the stop command is received
@@ -262,7 +266,7 @@ impl StreamPlayerImpl {
 
     pub fn status(&self) -> PlayerStatus {
         PlayerStatus {
-            elapsed_samples: self.elapsed_samples.clone(),
+            elapsed_samples: Arc::clone(&self.elapsed_samples),
             device_output_info: self.device_output_info,
         }
     }

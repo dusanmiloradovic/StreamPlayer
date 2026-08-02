@@ -211,6 +211,7 @@ impl Streamer for SingleStreamer {
         let track_id = ii.track_id;
         let channels_size = ii.channels;
 
+        
         let resampler = if output_info.sample_rate != ii.sample_rate {
             Fft::<f32>::new(
                 ii.sample_rate as usize,
@@ -227,7 +228,7 @@ impl Streamer for SingleStreamer {
 
         let cmd_rx = self.command_rx.take();
 
-        let finished = self.finished.clone();
+        let finished = Arc::clone(&self.finished);
         let paused = self.control.paused_flag();
         let duration = self.get_duration();
 
@@ -371,7 +372,7 @@ impl Streamer for SingleStreamer {
     }
 
     fn finished_flag(&self) -> Arc<AtomicBool> {
-        self.finished.clone()
+        Arc::clone(&self.finished)
     }
 
     fn control_handle(&self) -> ControlHandle {
@@ -402,6 +403,6 @@ impl Streamer for SingleStreamer {
     }
 
     fn last_seek_position(&self) -> Arc<Option<AtomicU64>> {
-        self.last_seek_position.clone()
+        Arc::clone(&self.last_seek_position)
     }
 }

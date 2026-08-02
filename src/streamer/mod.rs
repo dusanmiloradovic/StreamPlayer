@@ -185,7 +185,7 @@ impl ControlHandle {
 
     /// The shared pause flag, honored by the owning streamer's play loop.
     pub fn paused_flag(&self) -> Arc<AtomicBool> {
-        self.paused.clone()
+        Arc::clone(&self.paused)
     }
 
     pub fn pause(&self) {

@@ -49,7 +49,7 @@ fn apply_mixer_control(
         }
         ControlCommand::AddGainFunction(gf) => {
             for c in children {
-                let _ = c.add_gain_function(gf.clone());
+                let _ = c.add_gain_function(Arc::clone(&gf));
             }
             false
         }
@@ -143,8 +143,8 @@ impl Mixer {
     /// the `Mixer` has been moved into a player and playback has started.
     pub fn handle(&self) -> MixerHandle {
         MixerHandle {
-            shared: self.shared.clone(),
-            play_position: self.play_position.clone(),
+            shared: Arc::clone(&self.shared),
+            play_position: Arc::clone(&self.play_position),
         }
     }
 
@@ -157,7 +157,7 @@ impl Mixer {
                 self.sync_sender.as_ref().unwrap(),
                 &self.play_position,
                 streamer,
-                weight_arc.clone(),
+                Arc::clone(&weight_arc),
                 auto_seek,
                 self.device_output_info.clone().unwrap(),
             );
@@ -189,9 +189,9 @@ impl Mixer {
             //TODO need to get the current position of the player first, and then seek
         }
 
-        let sb = shared_buf.clone();
-        let ix = index.clone();
-        let ff = finished.clone();
+        let sb = Arc::clone(&shared_buf);
+        let ix = Arc::clone(&index);
+        let ff = Arc::clone(&finished);
         let ss = sync_sender.clone();
         thread::spawn(move || {
             while let Ok(samples) = inner_receiver.recv()
@@ -297,9 +297,9 @@ impl Streamer for Mixer {
             let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
             s.play(output_info, inner_sender);
 
-            let ix = index.clone();
-            let sb = shared_buf.clone();
-            let ff = finished.clone();
+            let ix = Arc::clone(&index);
+            let sb = Arc::clone(&shared_buf);
+            let ff = Arc::clone(&finished);
             let ss = sync_sender.clone();
             let j = indices.len();
             thread::spawn(move || {
@@ -315,15 +315,15 @@ impl Streamer for Mixer {
             indices.push(index);
             shared_bufs.push(shared_buf);
             finished_flags.push(finished);
-            weights.push(w.clone());
+            weights.push(Arc::clone(w));
             children_control.push(control);
         }
 
-        let finished = self.finished.clone();
-        let stopped = self.stopped.clone();
+        let finished = Arc::clone(&self.finished);
+        let stopped = Arc::clone(&self.stopped);
         let paused = self.control.paused_flag();
         let control_rx = self.control_rx.take();
-        let play_position = self.play_position.clone();
+        let play_position = Arc::clone(&self.play_position);
 
         let normalize_gain = self.normalize_gain;
 
@@ -441,7 +441,7 @@ impl Streamer for Mixer {
     }
 
     fn finished_flag(&self) -> Arc<AtomicBool> {
-        self.finished.clone()
+        Arc::clone(&self.finished)
     }
 
     fn control_handle(&self) -> ControlHandle {
@@ -449,7 +449,7 @@ impl Streamer for Mixer {
     }
 
     fn last_seek_position(&self) -> Arc<Option<AtomicU64>> {
-        self.last_seek_position.clone()
+        Arc::clone(&self.last_seek_position)
     }
 
     fn get_duration(&self) -> Option<u64> {
