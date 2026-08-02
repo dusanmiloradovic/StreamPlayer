@@ -2,7 +2,7 @@ use crate::streamer::mixer::{Mixer, MixerHandle};
 use crate::streamer::utils::{f_fadein_linear, f_fadein_log, f_fadeout_linear, f_fadeout_log};
 use crate::streamer::{
     ControlCommand, ControlHandle, DeviceOutputInfo, StreamErr, Streamer,
-    StreamerInputInfo, add_callback,
+    NO_SEEK, StreamerInputInfo, add_callback,
 };
 use crossbeam_channel::Sender;
 use std::borrow::Cow;
@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
+use crate::stream_player::StreamNotify;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum CrossFadeType {
@@ -27,7 +28,7 @@ pub struct PlayListStreamer {
     sync_tx: Option<Sender<usize>>,
     command_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
     cross_fade_type: CrossFadeType,
-    last_seek_position: Arc<Option<AtomicU64>>,
+    last_seek_position: Arc<AtomicU64>,
 }
 
 impl PlayListStreamer {
@@ -40,7 +41,7 @@ impl PlayListStreamer {
             control_rx: Some(control_rx),
             sync_tx: None,
             command_rx: None,
-            last_seek_position: Arc::new(None),
+            last_seek_position: Arc::new(AtomicU64::new(NO_SEEK)),
         }
     }
 }
@@ -49,6 +50,7 @@ fn loop_no_crossfade(
     streamer_queue: Arc<Mutex<Vec<Box<dyn Streamer>>>>,
     sender: SyncSender<Vec<f32>>,
     device_output_info: DeviceOutputInfo,
+    stream_notifier: SyncSender<StreamNotify>,
 ) {
     let current = {
         let mut streamers = streamer_queue.lock().unwrap();
@@ -61,13 +63,13 @@ fn loop_no_crossfade(
     let sender_clone = sender.clone();
     let inital_streamers = vec![current];
     let mut mixer = Mixer::new(inital_streamers, vec![1]);
-    let mixer_thread = mixer.play(device_output_info, sender);
+    let mixer_thread = mixer.play(device_output_info, sender, stream_notifier.clone());
     if let Err(some) = mixer_thread.join().unwrap() {
         println!("Error: {:?}", some);
         return; // TODO work on the error type return from joinhandle
     }
 
-    loop_no_crossfade(Arc::clone(&streamer_queue), sender_clone, device_output_info)
+    loop_no_crossfade(Arc::clone(&streamer_queue), sender_clone, device_output_info, stream_notifier.clone())
 }
 
 type FadeFn = Arc<dyn Fn(usize) -> f32 + Send + Sync>;
@@ -122,6 +124,7 @@ impl Streamer for PlayListStreamer {
         &mut self,
         output_info: DeviceOutputInfo,
         sender: SyncSender<Vec<f32>>,
+        stream_notifier: SyncSender<StreamNotify>,
     ) -> JoinHandle<Result<(), StreamErr>> {
         let streamers = Arc::clone(&self.streamers);
         if streamers.lock().unwrap().is_empty() {
@@ -137,7 +140,7 @@ impl Streamer for PlayListStreamer {
 
         if fade_secs == 0 || first_dur.is_none() {
             return thread::spawn(move || {
-                loop_no_crossfade(Arc::clone(&streamers), sender.clone(), output_info);
+                loop_no_crossfade(Arc::clone(&streamers), sender.clone(), output_info, stream_notifier.clone());
                 Ok(())
             });
         }
@@ -162,7 +165,7 @@ impl Streamer for PlayListStreamer {
         let cutoff = first_dur.unwrap().saturating_sub(fade_secs);
         schedule_crossfade(ctx, first_control, cutoff);
 
-        mixer.play(output_info, sender)
+        mixer.play(output_info, sender, stream_notifier.clone())
     }
 
     fn get_input_info(&self) -> Result<Cow<'_, StreamerInputInfo>, StreamErr> {
@@ -181,7 +184,7 @@ impl Streamer for PlayListStreamer {
         todo!()
     }
 
-    fn last_seek_position(&self) -> Arc<Option<AtomicU64>> {
+    fn last_seek_position(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.last_seek_position)
     }
 

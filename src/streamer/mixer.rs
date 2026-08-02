@@ -1,5 +1,5 @@
 use crate::streamer::{ControlCommand, ControlHandle, DeviceOutputInfo, StreamErr, Streamer,
-                      StreamerInputInfo,
+                      StreamerInputInfo, NO_SEEK,
 };
 use crossbeam_channel::{Sender, bounded, select};
 use std::borrow::Cow;
@@ -10,6 +10,7 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
+use crate::stream_player::StreamNotify;
 
 enum MixerCommand {
     Stop(usize), // stop the nth channel
@@ -82,7 +83,7 @@ pub struct Mixer {
     // mixing). When false, channels are summed as-is — used for crossfades,
     // where the per-channel fade gains already sum to ~unity.
     normalize_gain: bool,
-    last_seek_position: Arc<Option<AtomicU64>>,
+    last_seek_position: Arc<AtomicU64>,
 }
 
 struct MixerShared {
@@ -128,7 +129,7 @@ impl Mixer {
                 device_output_info,
             })),
             normalize_gain: true,
-            last_seek_position: Arc::new(None),
+            last_seek_position: Arc::new(AtomicU64::new(NO_SEEK)),
         }
     }
 
@@ -184,7 +185,7 @@ impl Mixer {
         let control = streamer.control_handle();
 
         let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-        streamer.play(device_output_info, inner_sender);
+        streamer.play(device_output_info, inner_sender, stream_notifier.clone());
         if auto_seek {
             //TODO need to get the current position of the player first, and then seek
         }
@@ -267,6 +268,7 @@ impl Streamer for Mixer {
         &mut self,
         output_info: DeviceOutputInfo,
         sender: SyncSender<Vec<f32>>,
+        stream_notifier: SyncSender<StreamNotify>,
     ) -> JoinHandle<Result<(), StreamErr>> {
         let (sync_sender, sync_receiver) = bounded::<usize>(8);
         let (cmd_tx, cmd_rx) = bounded::<MixerCommand>(4);
@@ -295,7 +297,7 @@ impl Streamer for Mixer {
             let control = s.control_handle();
 
             let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-            s.play(output_info, inner_sender);
+            s.play(output_info, inner_sender, stream_notifier.clone());
 
             let ix = Arc::clone(&index);
             let sb = Arc::clone(&shared_buf);
@@ -448,7 +450,7 @@ impl Streamer for Mixer {
         self.control.clone()
     }
 
-    fn last_seek_position(&self) -> Arc<Option<AtomicU64>> {
+    fn last_seek_position(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.last_seek_position)
     }
 

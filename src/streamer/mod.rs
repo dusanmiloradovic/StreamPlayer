@@ -9,11 +9,13 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use symphonia::core::codecs::CodecParameters;
+use crate::stream_player::StreamNotify;
 
 pub mod mixer;
 pub mod playlist;
 pub mod single;
 pub mod utils;
+pub (crate) const NO_SEEK: u64 = u64::MAX;
 
 #[derive(Debug)]
 pub enum StreamErr {
@@ -53,6 +55,12 @@ impl Default for StreamerCallbackShared {
         Self::new()
     }
 }
+
+// TODO The callbacks timing are based on the play time, not on the clock time
+// With seek functionality strime   can go back in time, so we need to disinguish
+// will the callback be called again, or its one time only
+// also we need to give the option for absolute play time vs media play time(if it was played for n minutes vs execute on 3. minute of stream)
+// 1 will for now implement just media time callbacks that are re-entrant(i need that for playlists)
 
 impl StreamerCallbackShared {
     fn convert_duration_to_samples(&self, d: Duration) -> u64 {
@@ -236,6 +244,7 @@ pub trait Streamer: Send {
         &mut self,
         output_info: DeviceOutputInfo,
         sender: SyncSender<Vec<f32>>,
+        stream_notifier: SyncSender<StreamNotify>,
     ) -> JoinHandle<Result<(), StreamErr>>;
     fn get_input_info(&self) -> Result<Cow<'_, StreamerInputInfo>, StreamErr>;
     // TODO *decoded.spec.rate holds always the decoded sample rate, maybe use that as alternative
@@ -245,7 +254,7 @@ pub trait Streamer: Send {
     /// safe to capture in a sample callback.
     fn control_handle(&self) -> ControlHandle;
     fn get_duration(&self) -> Option<u64>;
-    fn last_seek_position(&self) -> Arc<Option<AtomicU64>>;
+    fn last_seek_position(&self) -> Arc<AtomicU64>;
 }
 
 #[derive(Clone)]

@@ -1,5 +1,5 @@
 use crate::streamer::{
-    ControlCommand, ControlHandle, DeviceOutputInfo, StreamErr, Streamer, StreamerInputInfo,
+    ControlCommand, ControlHandle, DeviceOutputInfo, StreamErr, Streamer, StreamerInputInfo, NO_SEEK,
 };
 use audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Resampler};
@@ -21,6 +21,7 @@ use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::{Hint, ProbeResult};
 use symphonia::core::units::Time;
+use crate::stream_player::StreamNotify;
 
 const CHUNK_SIZE: usize = 1024;
 
@@ -56,7 +57,7 @@ pub struct SingleStreamer {
     command_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
     streamer_input_info: Option<StreamerInputInfo>,
     output_info: Option<DeviceOutputInfo>,
-    last_seek_position: Arc<Option<AtomicU64>>,
+    last_seek_position: Arc<AtomicU64>,
 }
 
 
@@ -135,7 +136,7 @@ impl SingleStreamer {
             command_rx: Some(command_rx),
             streamer_input_info: None,
             output_info: None,
-            last_seek_position: Arc::new(None),
+            last_seek_position: Arc::new(AtomicU64::new(NO_SEEK)),
         })
     }
 
@@ -189,6 +190,7 @@ impl Streamer for SingleStreamer {
         &mut self,
         output_info: DeviceOutputInfo,
         sender: SyncSender<Vec<f32>>,
+        stream_notifier: SyncSender<StreamNotify>,
     ) -> JoinHandle<Result<(), StreamErr>> {
         self.output_info = Some(output_info.clone());
         let _probed = self.get_probe();
@@ -232,7 +234,12 @@ impl Streamer for SingleStreamer {
         let paused = self.control.paused_flag();
         let duration = self.get_duration();
 
-
+        let last_seek_position = Arc::clone(&self.last_seek_position);
+        let time_base = format
+            .tracks()
+            .iter()
+            .find(|t| t.id == track_id)
+            .and_then(|t| t.codec_params.time_base);
         thread::spawn(move || -> Result<(), StreamErr> {
             let cmd_rx = cmd_rx.ok_or(StreamErr::AlreadyPlaying)?;
             //let mut format = format.ok_or(StreamErr::AlreadyPlaying)?;
@@ -245,6 +252,8 @@ impl Streamer for SingleStreamer {
                 .map_err(|_| StreamErr::UnsupportedCodec)?;
             let mut gain_function: Option<Arc<dyn Fn(usize) -> f32 + Send>> = None;
             let mut resampled_len: usize = 0;
+            let mut seek_pending = false;
+
 
             loop {
                 while paused.load(std::sync::atomic::Ordering::Acquire) {
@@ -263,18 +272,35 @@ impl Streamer for SingleStreamer {
                             track_id: Some(track_id),
                         };
                         match format.seek(SeekMode::Coarse, to) {
-                            Ok(s) => {
+                            Ok(seeked) => {
                                 decoder.reset();
                                 resampling_buffer.clear();
                                 resampled_len = 0;
+                                let tb = format
+                                    .tracks()
+                                    .iter()
+                                    .find(|t| t.id == seeked.track_id)
+                                    .and_then(|t| t.codec_params.time_base);
+
+                                if let Some(tb) = tb {
+                                    let time = tb.calc_time(seeked.actual_ts);      // Time { seconds, frac }
+                                    let secs = time.seconds;
+                                    last_seek_position.store(secs, std::sync::atomic::Ordering::Relaxed);
+                                    if stream_notifier.send(StreamNotify::Seek(secs)).is_err(){
+                                        println!("Failed to notify streamer of seek position");
+                                    }
+                                }else{
+                                    return Err(StreamErr::SeekError);
+                                }
+
                                 //TODO notify streamer of position
                             } // fine
                             Err(Error::SeekError(_)) => {
                                 decoder.reset();
                                 resampling_buffer.clear();
                                 resampled_len = 0;
+                                seek_pending = true;
                                 /* position unknown → re-seek if needed */
-                                // TODO get position first somehow (next_packet), and notify streamer
                             }
                             Err(Error::IoError(e)) if e.kind() == UnexpectedEof => {
                                 finished.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -282,7 +308,7 @@ impl Streamer for SingleStreamer {
                             }
                             Err(Error::ResetRequired) => {
                                 decoder.reset(); /* then continue */
-                                //TODO get position
+                                seek_pending = true;
                             }
                             Err(Error::IoError(_)) => {
                                 /* real source failure → source is dead, bail/retry */
@@ -318,7 +344,22 @@ impl Streamer for SingleStreamer {
                 }
 
                 let packet = match format.next_packet() {
-                    Ok(packet) => packet,
+                    Ok(packet) => {
+                        if (seek_pending) {
+                            let ts=packet.ts;
+                            seek_pending = false;
+                            resampled_len = 0;
+                            if let Some(tb)=time_base{
+                                let time = tb.calc_time(ts);      // Time { seconds, frac }
+                                let secs = time.seconds;
+                                last_seek_position.store(secs, std::sync::atomic::Ordering::Relaxed);
+                                if stream_notifier.send(StreamNotify::Seek(secs)).is_err(){
+                                    println!("Failed to notify streamer of seek position");
+                                }
+                            }
+                        }
+                        packet
+                    },
                     Err(Error::ResetRequired) => {
                         finished.store(true, std::sync::atomic::Ordering::Relaxed);
                         return Err(StreamErr::UnknownError);
@@ -402,7 +443,7 @@ impl Streamer for SingleStreamer {
         self.output_info.clone()
     }
 
-    fn last_seek_position(&self) -> Arc<Option<AtomicU64>> {
+    fn last_seek_position(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.last_seek_position)
     }
 }

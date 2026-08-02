@@ -1,4 +1,4 @@
-use crate::streamer::{callback_shared, Callback, DeviceOutputInfo};
+use crate::streamer::{callback_shared, Callback, DeviceOutputInfo, NO_SEEK};
 use crate::streamer::{StreamErr, Streamer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{default_host, StreamError, SupportedStreamConfig};
@@ -20,7 +20,7 @@ pub struct StreamPlayerImpl {
     next_sample_callback: Arc<AtomicU64>,
     sample_callbacks: Arc<Mutex<BTreeSet<u64>>>,
     device_output_info: DeviceOutputInfo,
-    last_seek_position: Arc<Option<AtomicU64>>,
+    last_seek_position: Arc<AtomicU64>,
 }
 
 pub fn new_stream_player(
@@ -52,6 +52,13 @@ pub enum BitRateInfo {
     Streamer,
     DeviceDefault,
     Manual(u32, u16),
+}
+
+// currently, the commands are sent directly to streamers
+// This is the only exception, we need to adjust the  callback timings after the seek on streamer
+pub(crate)enum StreamNotify{
+    Seek(u64),
+    Rewind,
 }
 
 impl StreamPlayerImpl {
@@ -128,6 +135,7 @@ impl StreamPlayerImpl {
         let (mut producer, mut consumer) = HeapRb::<f32>::new(ring_size).split();
 
         let (command_tx, command_rx) = mpsc::channel::<StreamCommand>();
+        let (notifer_tx, notifer_rx) = mpsc::sync_channel::<StreamNotify>(8);
         let (callback_register_tx, callback_register_rx) = mpsc::sync_channel::<u64>(8);
         let (callback_sender, callback_receiver) = mpsc::sync_channel::<Callback>(8);
 
@@ -179,6 +187,16 @@ impl StreamPlayerImpl {
                 }
             }
         });
+        thread::spawn(move || {
+            while let Ok(notification) = notifer_rx.recv() {
+                if let StreamNotify::Seek(secs) = notification {
+                   if streamer_last_seek_position.load(Relaxed) != NO_SEEK{
+                       streamer_last_seek_position.store(NO_SEEK, Relaxed);
+                       //NOW handle th eposition
+                   }
+                }
+            }
+        });
         // this is a standalone thread for calling callbacks
         let counter = Arc::clone(&self.elapsed_samples);
         let nse = Arc::clone(&self.next_sample_callback);
@@ -224,7 +242,7 @@ impl StreamPlayerImpl {
         let stpd = Arc::clone(&stopped);
         let handle = thread::spawn(move || {
             if let Err(e) = streamer
-                .play(device_output_info, sender)
+                .play(device_output_info, sender, notifer_tx)
                 .join()
                 .unwrap_or(Err(StreamErr::UnknownError))
             {
