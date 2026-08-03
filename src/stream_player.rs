@@ -191,6 +191,7 @@ impl StreamPlayerImpl {
             while let Ok(notification) = notifer_rx.recv() {
                 if let StreamNotify::Seek(secs) = notification {
                    if streamer_last_seek_position.load(Relaxed) != NO_SEEK{
+                       println!("Seeking to {}", secs);
                        streamer_last_seek_position.store(NO_SEEK, Relaxed);
                        //NOW handle th eposition
                    }
@@ -215,6 +216,9 @@ impl StreamPlayerImpl {
                     callback_sender.send(CbOnSample(target)).ok();
                     let next = sample_callbacks.lock().unwrap().pop_first();
                     nse.store(next.unwrap_or(0), Relaxed);
+                    // TODO for seek backwards we need to maintin a separate list of this popped-out
+                    // and put them back (only ones after current timestamp)
+                    // for seek forwawrd, remove everything before new timestamp into the list
                 } else {
                     thread::sleep(Duration::from_millis(50));
                 }

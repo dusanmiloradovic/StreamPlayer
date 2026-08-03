@@ -38,7 +38,7 @@ fn apply_mixer_control(
         }
         ControlCommand::Seek(time) => {
             for c in children {
-                let _ = c.seek(time);
+               // let _ = c.seek(time);
             }
             false
         }
@@ -185,7 +185,7 @@ impl Mixer {
         let control = streamer.control_handle();
 
         let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-        streamer.play(device_output_info, inner_sender, stream_notifier.clone());
+       // streamer.play(device_output_info, inner_sender, stream_notifier.clone());
         if auto_seek {
             //TODO need to get the current position of the player first, and then seek
         }

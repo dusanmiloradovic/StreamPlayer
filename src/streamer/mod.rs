@@ -125,6 +125,8 @@ impl StreamerCallbackShared {
                         let cb = CALLBACK_SHARED.callbacks.lock().unwrap().remove(&cb_time);
                         if let Some(cb) = cb {
                             cb();
+                            CALLBACK_SHARED.callbacks.lock().unwrap().insert(cb_time, cb);
+                            // TODO add additional re-entrant option fov closure, in which case we will not have this
                         }
                     }
                     Err(_) => {} //TODO analyze when this can happen and how to handle error
