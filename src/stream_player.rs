@@ -293,10 +293,12 @@ impl StreamPlayerImpl {
 
 
         let data_callback = move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            if psb.load(Relaxed) != NO_SEEK {
-               consumer.clear();
-                media_counter.store(psb.load(Relaxed), Relaxed);
-                psb.store(NO_SEEK,Relaxed);// resync after, not before
+            // claim the pending seek in a single RMW; a plain load/store pair would let
+            // a second seek slip in between and be consumed without clearing the buffer
+            let seek_to = psb.swap(NO_SEEK, Relaxed);
+            if seek_to != NO_SEEK {
+                consumer.clear();
+                media_counter.store(seek_to, Relaxed); // resync after the clear, not before
             }
             for sample in out.iter_mut() {
                 *sample = consumer.try_pop().unwrap_or(0.0);
