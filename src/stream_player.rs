@@ -59,7 +59,7 @@ pub enum BitRateInfo {
 // currently, the commands are sent directly to streamers
 // This is the only exception, we need to adjust the  callback timings after the seek on streamer
 pub(crate) enum StreamNotify {
-    Seek(u64),
+    Seek(f64),// we need also fractional parts of seconds
     Rewind,
 }
 
@@ -197,6 +197,7 @@ impl StreamPlayerImpl {
         let dio = self.device_output_info;
         let sample_rate = dio.sample_rate;
         let channels = dio.channels;
+        println!("sample_rate: {}, channels: {}", sample_rate, channels);
        // let seek_media_counter = Arc::clone(&self.media_elapsed_samples);
         let nse = Arc::clone(&self.next_sample_callback);
         //let passed_callbacks = Arc::clone(&self.passed_callbacks);
@@ -215,7 +216,7 @@ impl StreamPlayerImpl {
                         streamer_last_seek_position.store(NO_SEEK, Relaxed);
                         // there will be multiple streamers notifying , only the main one will be effective
                         // but we need to reset this
-                        let new_media_samples_pos = channels as u64 * sample_rate as u64 * secs;
+                        let new_media_samples_pos = (channels as f64 * sample_rate as f64 * secs) as u64;
                         pending_seek_buffer_clear.store(new_media_samples_pos, Relaxed);
                        // seek_media_counter.store(new_media_samples_pos, Relaxed);
                         // In the audio thread (data_callback) we will set the counter, that is where its increased
@@ -226,6 +227,7 @@ impl StreamPlayerImpl {
                         if next_counter <= smc {
                             // already passed the triggering time
                             nse.store(0, Relaxed);
+                            println!("next_counter: {}, smc: {}", next_counter, smc);
                             let mut del_vec: Vec<u64> = Vec::new(); //smpl.iter is immutable borrow,cant remove while looping
                             for &s in smpl.iter() {
                                 if s < smc {
@@ -234,6 +236,7 @@ impl StreamPlayerImpl {
                                 }
                                 if s >= smc && nse.load(Relaxed) == 0 {
                                     del_vec.push(s);
+                                    println!("1#nse {}",s);
                                     nse.store(s, Relaxed);
                                 }
                             }
@@ -246,6 +249,7 @@ impl StreamPlayerImpl {
                             for &p in psdl.iter() {
                                 if p >= smc {
                                     if nse.load(Relaxed) == 0 {
+                                        println!("2#nse {}",p);
                                         nse.store(p, Relaxed);
                                     } else {
                                         smpl.insert(p);

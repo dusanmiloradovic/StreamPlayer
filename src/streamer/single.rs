@@ -284,8 +284,10 @@ impl Streamer for SingleStreamer {
 
                                 if let Some(tb) = tb {
                                     let time = tb.calc_time(seeked.actual_ts);      // Time { seconds, frac }
-                                    let secs = time.seconds;
-                                    last_seek_position.store(secs, std::sync::atomic::Ordering::Relaxed);
+                                    let secs = time.seconds as f64+ time.frac;
+
+                                    last_seek_position.store(seeked.actual_ts, std::sync::atomic::Ordering::Relaxed);
+                                   // last_seek_position.store(secs, std::sync::atomic::Ordering::Relaxed);
                                     if stream_notifier.send(StreamNotify::Seek(secs)).is_err(){
                                         println!("Failed to notify streamer of seek position");
                                     }
@@ -351,8 +353,8 @@ impl Streamer for SingleStreamer {
                             resampled_len = 0;
                             if let Some(tb)=time_base{
                                 let time = tb.calc_time(ts);      // Time { seconds, frac }
-                                let secs = time.seconds;
-                                last_seek_position.store(secs, std::sync::atomic::Ordering::Relaxed);
+                                let secs = time.seconds as f64+ time.frac;
+                                last_seek_position.store(time.seconds, std::sync::atomic::Ordering::Relaxed);
                                 if stream_notifier.send(StreamNotify::Seek(secs)).is_err(){
                                     println!("Failed to notify streamer of seek position");
                                 }
