@@ -23,8 +23,10 @@ fn play_single_streamer() {
     )
     .unwrap();
     let control_handle = s3.control_handle();
+    let ch = control_handle.clone();
     let mut player = stream_player::new_stream_player(Box::new(s3), BitRateInfo::Streamer).unwrap();
-    let status = player.status(); // cloneable handle: query play time without owning the player
+    let status = player.status();
+    let status2= status.clone();// cloneable handle: query play time without owning the player
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -39,19 +41,25 @@ fn play_single_streamer() {
             println!("Callback from single after ,{} seconds", (ms2 - ms) / 1000);
             let play_time = status.get_play_time_ms();
             println!("Play time: from player {}", play_time / 1000f32);
-            control_handle.seek(5).unwrap();
-            let ch = control_handle.clone();
-            add_callback(
-                Duration::from_secs(15),
-                Box::new(move || {
-                    println!("Callback from single again!");
-                    ch.seek(0).unwrap();
-                }),
-            )
-            .unwrap();
+            control_handle.seek(15).unwrap();
+
         }),
     )
     .unwrap();
+
+    add_callback(
+        Duration::from_secs(20),
+        Box::new(move || {
+            let ms2 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            println!("Callback from single after ,{} seconds", (ms2 - ms) / 1000);
+            let play_time = status2.get_play_time_ms();
+            println!("Play time: from player {}", play_time / 1000f32);
+        }),
+    )
+        .unwrap();
     let handle = player.start().unwrap();
     handle.join().unwrap();
 }
