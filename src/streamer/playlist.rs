@@ -105,7 +105,12 @@ struct CrossfadeCtx {
     fade_samples: usize,
 }
 
-fn schedule_crossfade(ctx: Arc<CrossfadeCtx>, outgoing_control: ControlHandle, cutoff_secs: u64, current_pos: Arc<AtomicU16>) {
+fn schedule_crossfade(
+    ctx: Arc<CrossfadeCtx>,
+    outgoing_control: ControlHandle,
+    cutoff_secs: u64,
+    current_pos: Arc<AtomicU16>,
+) {
     let ctx_cb = Arc::clone(&ctx);
     //current_pos.fetch_add(1, Ordering::Relaxed);
     let curr_poss = Arc::clone(&current_pos);
@@ -130,7 +135,12 @@ fn schedule_crossfade(ctx: Arc<CrossfadeCtx>, outgoing_control: ControlHandle, c
         ctx_cb.handle.add(*next, 1, false);
         if let Some(d) = next_dur {
             let next_cutoff = cutoff_secs + d.saturating_sub(ctx_cb.fade_secs);
-            schedule_crossfade(Arc::clone(&ctx_cb), next_control, next_cutoff,Arc::clone(&current_pos));
+            schedule_crossfade(
+                Arc::clone(&ctx_cb),
+                next_control,
+                next_cutoff,
+                Arc::clone(&current_pos),
+            );
         }
     });
     let _ = add_callback(Duration::from_secs(cutoff_secs), cb);
@@ -210,7 +220,7 @@ impl Streamer for PlayListStreamer {
 
     // TODO detect when playlist is finished, and set finished flag
     fn control_handle(&self) -> ControlHandle {
-       self.control.clone()
+        self.control.clone()
     }
 
     fn last_seek_position(&self) -> Arc<AtomicU64> {
@@ -219,5 +229,16 @@ impl Streamer for PlayListStreamer {
 
     fn get_duration(&self) -> Option<u64> {
         todo!()
+    }
+
+    fn respawn(&self) -> Result<Box<dyn Streamer>, StreamErr> {
+        let respawned = self
+            .streamers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.respawn())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Box::new(PlayListStreamer::new(respawned, self.cross_fade_type)))
     }
 }

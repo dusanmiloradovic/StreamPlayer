@@ -472,4 +472,15 @@ impl Streamer for Mixer {
         }
         if d == 0 { None } else { Some(d) }
     }
+
+    fn respawn(&self) -> Result<Box<dyn Streamer>, StreamErr> {
+        let respawned_streamers = self
+            .streamers
+            .iter()
+            .map(|s| s.respawn())
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut m = Mixer::new(respawned_streamers, self.get_weights());
+        m.set_normalize_gain(self.normalize_gain);
+        Ok(Box::new(m))
+    }
 }

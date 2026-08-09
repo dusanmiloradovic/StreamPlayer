@@ -272,6 +272,9 @@ pub trait Streamer: Send {
     fn control_handle(&self) -> ControlHandle;
     fn get_duration(&self) -> Option<u64>;
     fn last_seek_position(&self) -> Arc<AtomicU64>;
+    fn respawn(&self) -> Result<Box<dyn Streamer>, StreamErr>; // it gives a copy of the streamer
+    // currently it will only be done in playlist, and only if the original streamer is finished
+    // i will put that limitation in the playlist streamer itself, and respawn just clones the original streamer
 }
 
 #[derive(Clone)]
