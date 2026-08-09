@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use crate::stream_player::StreamNotify;
+use crate::stream_player::{PlayerStatus, StreamNotify};
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum CrossFadeType {
@@ -49,7 +49,7 @@ impl PlayListStreamer {
 fn loop_no_crossfade(
     streamer_queue: Arc<Mutex<Vec<Box<dyn Streamer>>>>,
     sender: SyncSender<Vec<f32>>,
-    device_output_info: DeviceOutputInfo,
+    player_status: PlayerStatus,
     stream_notifier: SyncSender<StreamNotify>,
 ) {
     let current = {
@@ -63,13 +63,14 @@ fn loop_no_crossfade(
     let sender_clone = sender.clone();
     let inital_streamers = vec![current];
     let mut mixer = Mixer::new(inital_streamers, vec![1]);
-    let mixer_thread = mixer.play(device_output_info, sender, stream_notifier.clone());
+    let ps_clone= player_status.clone();
+    let mixer_thread = mixer.play(player_status, sender, stream_notifier.clone());
     if let Err(some) = mixer_thread.join().unwrap() {
         println!("Error: {:?}", some);
         return; // TODO work on the error type return from joinhandle
     }
 
-    loop_no_crossfade(Arc::clone(&streamer_queue), sender_clone, device_output_info, stream_notifier.clone())
+    loop_no_crossfade(Arc::clone(&streamer_queue), sender_clone, ps_clone, stream_notifier.clone())
 }
 
 type FadeFn = Arc<dyn Fn(usize) -> f32 + Send + Sync>;
@@ -122,10 +123,12 @@ fn schedule_crossfade(ctx: Arc<CrossfadeCtx>, outgoing_control: ControlHandle, c
 impl Streamer for PlayListStreamer {
     fn play(
         &mut self,
-        output_info: DeviceOutputInfo,
+       // output_info: DeviceOutputInfo,
+        player_status: PlayerStatus,
         sender: SyncSender<Vec<f32>>,
         stream_notifier: SyncSender<StreamNotify>,
     ) -> JoinHandle<Result<(), StreamErr>> {
+        let output_info = player_status.device_output_info.clone();
         let streamers = Arc::clone(&self.streamers);
         if streamers.lock().unwrap().is_empty() {
             return thread::spawn(move || Ok(()));
@@ -140,7 +143,7 @@ impl Streamer for PlayListStreamer {
 
         if fade_secs == 0 || first_dur.is_none() {
             return thread::spawn(move || {
-                loop_no_crossfade(Arc::clone(&streamers), sender.clone(), output_info, stream_notifier.clone());
+                loop_no_crossfade(Arc::clone(&streamers), sender.clone(), player_status.clone(), stream_notifier.clone());
                 Ok(())
             });
         }
@@ -165,7 +168,7 @@ impl Streamer for PlayListStreamer {
         let cutoff = first_dur.unwrap().saturating_sub(fade_secs);
         schedule_crossfade(ctx, first_control, cutoff);
 
-        mixer.play(output_info, sender, stream_notifier.clone())
+        mixer.play(player_status, sender, stream_notifier.clone())
     }
 
     fn get_input_info(&self) -> Result<Cow<'_, StreamerInputInfo>, StreamErr> {

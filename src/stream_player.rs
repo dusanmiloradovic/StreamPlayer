@@ -58,7 +58,8 @@ pub enum BitRateInfo {
 
 // currently, the commands are sent directly to streamers
 // This is the only exception, we need to adjust the  callback timings after the seek on streamer
-pub(crate) enum StreamNotify {
+#[doc(hidden)]
+pub enum StreamNotify {
     Seek(f64),// we need also fractional parts of seconds
     Rewind,
 }
@@ -197,7 +198,6 @@ impl StreamPlayerImpl {
         let dio = self.device_output_info;
         let sample_rate = dio.sample_rate;
         let channels = dio.channels;
-        println!("sample_rate: {}, channels: {}", sample_rate, channels);
        // let seek_media_counter = Arc::clone(&self.media_elapsed_samples);
         let nse = Arc::clone(&self.next_sample_callback);
         //let passed_callbacks = Arc::clone(&self.passed_callbacks);
@@ -227,7 +227,6 @@ impl StreamPlayerImpl {
                         if next_counter <= smc {
                             // already passed the triggering time
                             nse.store(0, Relaxed);
-                            println!("next_counter: {}, smc: {}", next_counter, smc);
                             let mut del_vec: Vec<u64> = Vec::new(); //smpl.iter is immutable borrow,cant remove while looping
                             for &s in smpl.iter() {
                                 if s < smc {
@@ -236,7 +235,6 @@ impl StreamPlayerImpl {
                                 }
                                 if s >= smc && nse.load(Relaxed) == 0 {
                                     del_vec.push(s);
-                                    println!("1#nse {}",s);
                                     nse.store(s, Relaxed);
                                 }
                             }
@@ -249,7 +247,6 @@ impl StreamPlayerImpl {
                             for &p in psdl.iter() {
                                 if p >= smc {
                                     if nse.load(Relaxed) == 0 {
-                                        println!("2#nse {}",p);
                                         nse.store(p, Relaxed);
                                     } else {
                                         smpl.insert(p);
@@ -325,10 +322,11 @@ impl StreamPlayerImpl {
             callback_register_tx,
             device_output_info,
         );
+        let status = self.status().clone();
         let stpd = Arc::clone(&stopped);
         let handle = thread::spawn(move || {
             if let Err(e) = streamer
-                .play(device_output_info, sender, notifer_tx)
+                .play(status, sender, notifer_tx)
                 .join()
                 .unwrap_or(Err(StreamErr::UnknownError))
             {
@@ -371,14 +369,16 @@ impl StreamPlayerImpl {
         PlayerStatus {
             elapsed_samples: Arc::clone(&self.elapsed_samples),
             device_output_info: self.device_output_info,
+            media_elapsed_samples: Arc::clone(&self.media_elapsed_samples)
         }
     }
 }
 
 #[derive(Clone)]
 pub struct PlayerStatus {
-    elapsed_samples: Arc<AtomicU64>,
-    device_output_info: DeviceOutputInfo,
+    pub elapsed_samples: Arc<AtomicU64>,
+    pub media_elapsed_samples: Arc<AtomicU64>,
+    pub device_output_info: DeviceOutputInfo,
 }
 
 impl PlayerStatus {

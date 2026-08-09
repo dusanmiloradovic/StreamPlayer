@@ -10,7 +10,7 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
-use crate::stream_player::StreamNotify;
+use crate::stream_player::{PlayerStatus, StreamNotify};
 
 enum MixerCommand {
     Stop(usize), // stop the nth channel
@@ -266,7 +266,8 @@ impl MixerHandle {
 impl Streamer for Mixer {
     fn play(
         &mut self,
-        output_info: DeviceOutputInfo,
+       // output_info: DeviceOutputInfo,
+        player_status: PlayerStatus,
         sender: SyncSender<Vec<f32>>,
         stream_notifier: SyncSender<StreamNotify>,
     ) -> JoinHandle<Result<(), StreamErr>> {
@@ -289,6 +290,7 @@ impl Streamer for Mixer {
         let mut finished_flags: Vec<Arc<AtomicBool>> = Vec::new();
         let mut weights: Vec<Arc<AtomicU32>> = Vec::new();
         let mut children_control: Vec<ControlHandle> = Vec::new();
+        
 
         for (s, w) in self.streamers.iter_mut().zip(self.weights.iter()) {
             let index = Arc::new(AtomicUsize::new(0));
@@ -297,7 +299,7 @@ impl Streamer for Mixer {
             let control = s.control_handle();
 
             let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-            s.play(output_info, inner_sender, stream_notifier.clone());
+            s.play(player_status.clone(), inner_sender, stream_notifier.clone());
 
             let ix = Arc::clone(&index);
             let sb = Arc::clone(&shared_buf);

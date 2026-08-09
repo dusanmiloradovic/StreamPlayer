@@ -9,7 +9,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use symphonia::core::codecs::CodecParameters;
-use crate::stream_player::StreamNotify;
+use crate::stream_player::{PlayerStatus, StreamNotify};
 
 pub mod mixer;
 pub mod playlist;
@@ -31,6 +31,7 @@ pub enum StreamErr {
     ResamplingError,
     OutputStreamError,
     SendError,
+    CommandChannelFull,
     AlreadyPlaying,
     NotPlaying,
     InputInfoError,
@@ -223,6 +224,9 @@ impl ControlHandle {
     }
 
     fn send(&self, command: ControlCommand) -> Result<(), StreamErr> {
+        if self.command_tx.is_full()  {
+            return Err(StreamErr::CommandChannelFull);
+        }
         self.command_tx
             .send(command)
             .map_err(|_| StreamErr::SendError)
@@ -244,7 +248,8 @@ impl ControlHandle {
 pub trait Streamer: Send {
     fn play(
         &mut self,
-        output_info: DeviceOutputInfo,
+        //output_info: DeviceOutputInfo,
+        player_status:PlayerStatus, // contains DeviceOutputInfo and also playing times arc atomics
         sender: SyncSender<Vec<f32>>,
         stream_notifier: SyncSender<StreamNotify>,
     ) -> JoinHandle<Result<(), StreamErr>>;

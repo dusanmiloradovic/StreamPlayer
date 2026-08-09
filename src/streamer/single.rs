@@ -21,7 +21,7 @@ use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::{Hint, ProbeResult};
 use symphonia::core::units::Time;
-use crate::stream_player::StreamNotify;
+use crate::stream_player::{PlayerStatus, StreamNotify};
 
 const CHUNK_SIZE: usize = 1024;
 
@@ -188,11 +188,13 @@ impl SingleStreamer {
 impl Streamer for SingleStreamer {
     fn play(
         &mut self,
-        output_info: DeviceOutputInfo,
+        //output_info: DeviceOutputInfo,
+        player_status: PlayerStatus,
         sender: SyncSender<Vec<f32>>,
         stream_notifier: SyncSender<StreamNotify>,
     ) -> JoinHandle<Result<(), StreamErr>> {
-        self.output_info = Some(output_info.clone());
+        let output_info = player_status.device_output_info.clone();
+        self.output_info = Some(output_info);
         let _probed = self.get_probe();
         if _probed.is_err() {
             return thread::spawn(move || {
