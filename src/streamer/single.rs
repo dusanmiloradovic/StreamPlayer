@@ -52,7 +52,6 @@ fn get_media_source_from_stream_source(s: &StreamerSource) -> Box<dyn MediaSourc
 pub struct SingleStreamer {
     streamer_source: StreamerSource,
     mime_type: String,
-    finished: Arc<AtomicBool>,
     control: ControlHandle,
     command_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
     streamer_input_info: Option<StreamerInputInfo>,
@@ -131,7 +130,6 @@ impl SingleStreamer {
         Ok(Self {
             streamer_source,
             mime_type,
-            finished: Arc::new(AtomicBool::new(false)),
             control,
             command_rx: Some(command_rx),
             streamer_input_info: None,
@@ -232,7 +230,7 @@ impl Streamer for SingleStreamer {
 
         let cmd_rx = self.command_rx.take();
 
-        let finished = Arc::clone(&self.finished);
+        let finished = self.control.finished_flag();
         let paused = self.control.paused_flag();
         let duration = self.get_duration();
 
@@ -417,7 +415,7 @@ impl Streamer for SingleStreamer {
     }
 
     fn finished_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.finished)
+        self.control.finished_flag()
     }
 
     fn control_handle(&self) -> ControlHandle {

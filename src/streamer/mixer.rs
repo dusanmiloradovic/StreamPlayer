@@ -1,5 +1,7 @@
-use crate::streamer::{ControlCommand, ControlHandle, DeviceOutputInfo, StreamErr, Streamer,
-                      StreamerInputInfo, NO_SEEK,
+use crate::stream_player::{PlayerStatus, StreamNotify};
+use crate::streamer::{
+    ControlCommand, ControlHandle, DeviceOutputInfo, NO_SEEK, StreamErr, Streamer,
+    StreamerInputInfo,
 };
 use crossbeam_channel::{Sender, bounded, select};
 use std::borrow::Cow;
@@ -10,7 +12,6 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
-use crate::stream_player::{PlayerStatus, StreamNotify};
 
 enum MixerCommand {
     Stop(usize), // stop the nth channel
@@ -38,7 +39,7 @@ fn apply_mixer_control(
         }
         ControlCommand::Seek(time) => {
             for c in children {
-               // let _ = c.seek(time);
+                // let _ = c.seek(time);
             }
             false
         }
@@ -67,7 +68,6 @@ pub struct Mixer {
     streamers: Vec<Box<dyn Streamer>>,
     device_output_info: Option<DeviceOutputInfo>,
     weights: Vec<Arc<AtomicU32>>,
-    finished: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
     command_tx: Option<Sender<MixerCommand>>,
     // Retained after play() so add() can give new forwarder threads the ping channel.
@@ -116,7 +116,6 @@ impl Mixer {
             streamers,
             device_output_info,
             weights,
-            finished: Arc::new(AtomicBool::new(false)),
             stopped: Arc::new(AtomicBool::new(false)),
             command_tx: None,
             sync_sender: None,
@@ -152,7 +151,9 @@ impl Mixer {
     pub fn add(&mut self, streamer: Box<dyn Streamer>, weight: u32, auto_seek: bool) {
         let weight_arc = Arc::new(AtomicU32::new(weight));
 
-        if let Some(cmd_tx) = &self.command_tx && self.device_output_info.is_some() {
+        if let Some(cmd_tx) = &self.command_tx
+            && self.device_output_info.is_some()
+        {
             Self::add_live(
                 cmd_tx,
                 self.sync_sender.as_ref().unwrap(),
@@ -185,7 +186,7 @@ impl Mixer {
         let control = streamer.control_handle();
 
         let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-       // streamer.play(device_output_info, inner_sender, stream_notifier.clone());
+        // streamer.play(device_output_info, inner_sender, stream_notifier.clone());
         if auto_seek {
             //TODO need to get the current position of the player first, and then seek
         }
@@ -266,7 +267,7 @@ impl MixerHandle {
 impl Streamer for Mixer {
     fn play(
         &mut self,
-       // output_info: DeviceOutputInfo,
+        // output_info: DeviceOutputInfo,
         player_status: PlayerStatus,
         sender: SyncSender<Vec<f32>>,
         stream_notifier: SyncSender<StreamNotify>,
@@ -286,11 +287,10 @@ impl Streamer for Mixer {
         // These Vecs are owned exclusively by the mixing thread. The Add command
         // arm appends to them directly — no locking required.
         let mut indices: Vec<Arc<AtomicUsize>> = Vec::new();
-        let mut shared_bufs: Vec<Arc<Mutex<VecDeque<f32>>>> = Vec::new();
+        let mut shared_bufs: Vec<Option<Arc<Mutex<VecDeque<f32>>>>> = Vec::new(); // Option is for memory reclaim when streamer is finished
         let mut finished_flags: Vec<Arc<AtomicBool>> = Vec::new();
         let mut weights: Vec<Arc<AtomicU32>> = Vec::new();
         let mut children_control: Vec<ControlHandle> = Vec::new();
-        
 
         for (s, w) in self.streamers.iter_mut().zip(self.weights.iter()) {
             let index = Arc::new(AtomicUsize::new(0));
@@ -317,13 +317,13 @@ impl Streamer for Mixer {
             });
 
             indices.push(index);
-            shared_bufs.push(shared_buf);
+            shared_bufs.push(Some(shared_buf));
             finished_flags.push(finished);
             weights.push(Arc::clone(w));
             children_control.push(control);
         }
 
-        let finished = Arc::clone(&self.finished);
+        let finished = self.control.finished_flag();
         let stopped = Arc::clone(&self.stopped);
         let paused = self.control.paused_flag();
         let control_rx = self.control_rx.take();
@@ -359,6 +359,9 @@ impl Streamer for Mixer {
                         let mut min_index = usize::MAX;
                         for j in 0..len {
                             if finished_flags[j].load(Acquire) {
+                                if shared_bufs[j].is_some(){
+                                    shared_bufs[j].take(); //reclaim memory
+                                }
                                 continue;
                             }
                             min_index = min_index.min(indices[j].load(Acquire));
@@ -387,11 +390,12 @@ impl Streamer for Mixer {
                             };
 
                             let mut output_data = vec![0.0f32; v_size];
-                            for j in 0..len {
+                            for (j, slot) in shared_bufs.iter().enumerate(){
                                 if finished_flags[j].load(Relaxed) {
                                     continue;
                                 }
-                                let mut buf = shared_bufs[j].lock().unwrap();
+                                let Some(buf) = slot else { continue };
+                                let mut buf = buf.lock().unwrap();
                                 let available = buf.len().min(v_size);
                                 if available == 0 {
                                     continue;
@@ -410,10 +414,11 @@ impl Streamer for Mixer {
                             MixerCommand::Stop(ch_no) => {
                                 if let Some(flag) = finished_flags.get(ch_no) {
                                     flag.store(true, Relaxed);
+                                    shared_bufs[ch_no].take(); // reclaim buffer memory
                                 }
                             }
                             MixerCommand::Add { shared_buf, index, finished, weight, control } => {
-                                shared_bufs.push(shared_buf);
+                                shared_bufs.push(Some(shared_buf));
                                 indices.push(index);
                                 finished_flags.push(finished);
                                 weights.push(weight);
@@ -445,7 +450,7 @@ impl Streamer for Mixer {
     }
 
     fn finished_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.finished)
+        self.control.finished_flag()
     }
 
     fn control_handle(&self) -> ControlHandle {

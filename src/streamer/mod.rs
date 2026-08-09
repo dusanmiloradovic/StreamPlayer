@@ -2,7 +2,7 @@ use crossbeam_channel::{Sender, bounded};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::atomic::Ordering::{Acquire, Release};
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
@@ -37,6 +37,7 @@ pub enum StreamErr {
     InputInfoError,
     ProbeError,
     SeekError,
+    StreamerFinished,
 }
 
 pub struct StreamerCallbackShared {
@@ -177,6 +178,7 @@ pub struct DeviceOutputInfo {
 #[derive(Clone)]
 pub struct ControlHandle {
     paused: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>, // blocking command sending if the holding streamer is finished
     command_tx: Sender<ControlCommand>,
 }
 
@@ -188,6 +190,7 @@ impl ControlHandle {
         (
             ControlHandle {
                 paused: Arc::new(AtomicBool::new(false)),
+                finished: Arc::new(AtomicBool::new(false)),
                 command_tx,
             },
             command_rx,
@@ -197,6 +200,10 @@ impl ControlHandle {
     /// The shared pause flag, honored by the owning streamer's play loop.
     pub fn paused_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.paused)
+    }
+    
+    pub fn finished_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.finished)
     }
 
     pub fn pause(&self) {
@@ -226,6 +233,9 @@ impl ControlHandle {
     fn send(&self, command: ControlCommand) -> Result<(), StreamErr> {
         if self.command_tx.is_full()  {
             return Err(StreamErr::CommandChannelFull);
+        }
+        if self.finished.load(Relaxed) {
+            return Err(StreamErr::StreamerFinished);
         }
         self.command_tx
             .send(command)
