@@ -66,7 +66,6 @@ fn apply_mixer_control(
 
 pub struct Mixer {
     streamers: Vec<Box<dyn Streamer>>,
-    device_output_info: Option<DeviceOutputInfo>,
     weights: Vec<Arc<AtomicU32>>,
     stopped: Arc<AtomicBool>,
     command_tx: Option<Sender<MixerCommand>>,
@@ -89,7 +88,8 @@ pub struct Mixer {
 struct MixerShared {
     command_tx: Option<Sender<MixerCommand>>,
     sync_sender: Option<Sender<usize>>,
-    device_output_info: Option<DeviceOutputInfo>,
+    player_status: Option<PlayerStatus>,
+    stream_notifier: Option<SyncSender<StreamNotify>>,
 }
 
 /// A handle to a `Mixer` that can be retained by the caller after the `Mixer`
@@ -111,10 +111,9 @@ impl Mixer {
             .map(|x| Arc::new(AtomicU32::new(x)))
             .collect();
         let (control, control_rx) = ControlHandle::new();
-        let device_output_info = None;
+        let player_status = None;
         Self {
             streamers,
-            device_output_info,
             weights,
             stopped: Arc::new(AtomicBool::new(false)),
             command_tx: None,
@@ -125,7 +124,8 @@ impl Mixer {
             shared: Arc::new(Mutex::new(MixerShared {
                 command_tx: None,
                 sync_sender: None,
-                device_output_info,
+                player_status,
+                stream_notifier: None,
             })),
             normalize_gain: true,
             last_seek_position: Arc::new(AtomicU64::new(NO_SEEK)),
@@ -150,10 +150,17 @@ impl Mixer {
 
     pub fn add(&mut self, streamer: Box<dyn Streamer>, weight: u32, auto_seek: bool) {
         let weight_arc = Arc::new(AtomicU32::new(weight));
-
+        let (player_status, stream_notifier)={
+            let shared = self.shared.lock().unwrap();
+            (shared.player_status.clone(), shared.stream_notifier.clone())
+        };
+       
         if let Some(cmd_tx) = &self.command_tx
-            && self.device_output_info.is_some()
+            && player_status.is_some()  &&
+            stream_notifier.is_some()
         {
+            let ps = player_status.unwrap();
+            let sn = stream_notifier.unwrap();
             Self::add_live(
                 cmd_tx,
                 self.sync_sender.as_ref().unwrap(),
@@ -161,7 +168,8 @@ impl Mixer {
                 streamer,
                 Arc::clone(&weight_arc),
                 auto_seek,
-                self.device_output_info.clone().unwrap(),
+                ps.clone(),
+                sn.clone(),
             );
             self.weights.push(weight_arc);
         } else {
@@ -177,7 +185,8 @@ impl Mixer {
         mut streamer: Box<dyn Streamer>,
         weight_arc: Arc<AtomicU32>,
         auto_seek: bool,
-        device_output_info: DeviceOutputInfo,
+        player_status: PlayerStatus,
+        stream_notifier: SyncSender<StreamNotify>,
     ) {
         let current_pos = play_position.load(Relaxed);
         let shared_buf = Arc::new(Mutex::new(VecDeque::new()));
@@ -186,7 +195,7 @@ impl Mixer {
         let control = streamer.control_handle();
 
         let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-        // streamer.play(device_output_info, inner_sender, stream_notifier.clone());
+       streamer.play(player_status, inner_sender, stream_notifier.clone());
         if auto_seek {
             //TODO need to get the current position of the player first, and then seek
         }
@@ -238,10 +247,11 @@ impl Mixer {
 impl MixerHandle {
     pub fn add(&self, streamer: Box<dyn Streamer>, weight: u32, auto_seek: bool) {
         let shared = self.shared.lock().unwrap();
-        if let (Some(cmd_tx), Some(sync_sender), Some(device_output_info)) = (
+        if let (Some(cmd_tx), Some(sync_sender), Some(player_status), Some(stream_notifier)) = (
             &shared.command_tx,
             &shared.sync_sender,
-            &shared.device_output_info,
+            &shared.player_status,
+            &shared.stream_notifier,
         ) {
             let weight_arc = Arc::new(AtomicU32::new(weight));
             Mixer::add_live(
@@ -251,7 +261,8 @@ impl MixerHandle {
                 streamer,
                 weight_arc,
                 auto_seek,
-                device_output_info.clone(),
+                player_status.clone(),
+                stream_notifier.clone(),
             );
         }
     }

@@ -99,6 +99,7 @@ fn build_fades(fade_type: CrossFadeType, fade_samples: usize) -> (FadeFn, FadeFn
 
 struct CrossfadeCtx {
     queue: Arc<Mutex<Vec<Box<dyn Streamer>>>>,
+    respawned:Arc<Mutex<Vec<Box<dyn Streamer>>>>, //in order to play the stream it has to be moved, before that we "respawn" it, and save here in case rewind happens
     handle: MixerHandle,
     fade_type: CrossFadeType,
     fade_secs: u64,
@@ -121,18 +122,16 @@ fn schedule_crossfade(
             if q.is_empty() {
                 return;
             }
-            let v = q.get(next_pos as usize);
-            if v.is_none() {
-                return;
-            }
-            v.unwrap()
+           q.remove(0)
         };
+        let respawned = next.respawn();
+        ctx_cb.respawned.lock().unwrap().push(respawned);
         let next_dur = next.get_duration();
         let next_control = next.control_handle();
         let (fade_in, fade_out) = build_fades(ctx_cb.fade_type, ctx_cb.fade_samples);
         let _ = outgoing_control.add_gain_function(fade_out);
         let _ = next_control.add_gain_function(fade_in);
-        ctx_cb.handle.add(*next, 1, false);
+        ctx_cb.handle.add(next, 1, false);
         if let Some(d) = next_dur {
             let next_cutoff = cutoff_secs + d.saturating_sub(ctx_cb.fade_secs);
             schedule_crossfade(
@@ -194,6 +193,7 @@ impl Streamer for PlayListStreamer {
 
         let ctx = Arc::new(CrossfadeCtx {
             queue: Arc::clone(&streamers),
+            respawned:Arc::new(Mutex::new(vec![])),
             handle: handle.clone(),
             fade_type: self.cross_fade_type,
             fade_secs,
