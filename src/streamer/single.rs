@@ -258,6 +258,7 @@ impl Streamer for SingleStreamer {
                 while paused.load(std::sync::atomic::Ordering::Acquire) {
                     thread::sleep(std::time::Duration::from_millis(10));
                 }
+
                 match cmd_rx.try_recv() {
                     Ok(ControlCommand::Seek(time)) => {
                         if duration.is_none() || !seekable {

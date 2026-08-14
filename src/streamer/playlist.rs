@@ -2,8 +2,8 @@ use crate::stream_player::{PlayerStatus, StreamNotify};
 use crate::streamer::mixer::{Mixer, MixerHandle};
 use crate::streamer::utils::{f_fadein_linear, f_fadein_log, f_fadeout_linear, f_fadeout_log};
 use crate::streamer::{
-    ControlCommand, ControlHandle, DeviceOutputInfo, NO_SEEK, StreamErr, Streamer,
-    StreamerInputInfo, add_callback,
+    add_callback, ControlCommand, ControlHandle, DeviceOutputInfo, StreamErr, Streamer,
+    StreamerInputInfo, NO_SEEK,
 };
 use crossbeam_channel::Sender;
 use std::borrow::Cow;
@@ -16,9 +16,9 @@ use std::time::Duration;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum CrossFadeType {
+    Logarithmic(f32),
     Linear(f32),
     None,
-    Logarithmic(f32),
 }
 
 const NO_POS: u16 = u16::MAX;
@@ -26,7 +26,6 @@ const NO_POS: u16 = u16::MAX;
 pub struct PlayListStreamer {
     streamers: Arc<Mutex<Vec<Box<dyn Streamer>>>>, //looping in child thread and removing elements from vec
     control: ControlHandle,
-    control_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
     sync_tx: Option<Sender<usize>>,
     command_rx: Option<crossbeam_channel::Receiver<ControlCommand>>,
     cross_fade_type: CrossFadeType,
@@ -41,9 +40,8 @@ impl PlayListStreamer {
             streamers: Arc::new(Mutex::new(streamers)),
             cross_fade_type,
             control,
-            control_rx: Some(control_rx),
+            command_rx: Some(control_rx),
             sync_tx: None,
-            command_rx: None,
             last_seek_position: Arc::new(AtomicU64::new(NO_SEEK)),
             current_list_index: Arc::new(AtomicU16::new(NO_POS)),
         }
@@ -55,21 +53,26 @@ fn loop_no_crossfade(
     sender: SyncSender<Vec<f32>>,
     player_status: PlayerStatus,
     stream_notifier: SyncSender<StreamNotify>,
+    current_handle: Arc<Mutex<Option<ControlHandle>>>, //instead of creating another listner thread, we operate on underlying streamer from the main command thread in play
 ) {
-    let current = {
+    let ch_new = Arc::clone(&current_handle);
+    let mut current = {
         let mut streamers = streamer_queue.lock().unwrap();
         if streamers.is_empty() {
             return;
         }
-        streamers.remove(0)
+        let curr = streamers.remove(0);
+        let new_control_handler = curr.control_handle();
+        let mut guard = current_handle.lock().unwrap();
+        *guard = Some(new_control_handler);
+        curr
     };
 
+    // TODO its moved here, before the move do the clone (re-spawn), and push it to vec
     let sender_clone = sender.clone();
-    let inital_streamers = vec![current];
-    let mut mixer = Mixer::new(inital_streamers, vec![1]);
     let ps_clone = player_status.clone();
-    let mixer_thread = mixer.play(player_status, sender, stream_notifier.clone());
-    if let Err(some) = mixer_thread.join().unwrap() {
+    let handle = current.play(player_status, sender, stream_notifier.clone());
+    if let Err(some) = handle.join().unwrap() {
         println!("Error: {:?}", some);
         return; // TODO work on the error type return from joinhandle
     }
@@ -79,6 +82,7 @@ fn loop_no_crossfade(
         sender_clone,
         ps_clone,
         stream_notifier.clone(),
+        ch_new,
     )
 }
 
@@ -99,7 +103,7 @@ fn build_fades(fade_type: CrossFadeType, fade_samples: usize) -> (FadeFn, FadeFn
 
 struct CrossfadeCtx {
     queue: Arc<Mutex<Vec<Box<dyn Streamer>>>>,
-    respawned:Arc<Mutex<Vec<Box<dyn Streamer>>>>, //in order to play the stream it has to be moved, before that we "respawn" it, and save here in case rewind happens
+    respawned: Arc<Mutex<Vec<Box<dyn Streamer>>>>, //in order to play the stream it has to be moved, before that we "respawn" it, and save here in case rewind happens
     handle: MixerHandle,
     fade_type: CrossFadeType,
     fade_secs: u64,
@@ -113,19 +117,22 @@ fn schedule_crossfade(
     current_pos: Arc<AtomicU16>,
 ) {
     let ctx_cb = Arc::clone(&ctx);
-    //current_pos.fetch_add(1, Ordering::Relaxed);
+
     let curr_poss = Arc::clone(&current_pos);
     let cb: Box<dyn Fn() + Send> = Box::new(move || {
-        let next_pos = curr_poss.fetch_add(1, Ordering::Relaxed);
+        curr_poss.fetch_add(1, Ordering::Relaxed);
         let next = {
             let mut q = ctx_cb.queue.lock().unwrap();
             if q.is_empty() {
                 return;
             }
-           q.remove(0)
+            q.remove(0)
         };
         let respawned = next.respawn();
-        ctx_cb.respawned.lock().unwrap().push(respawned);
+        // we have to clone ("re-spawn") in advance, because handle.add consumes next
+        if respawned.is_ok() {
+            ctx_cb.respawned.lock().unwrap().push(respawned.unwrap())
+        }
         let next_dur = next.get_duration();
         let next_control = next.control_handle();
         let (fade_in, fade_out) = build_fades(ctx_cb.fade_type, ctx_cb.fade_samples);
@@ -170,13 +177,61 @@ impl Streamer for PlayListStreamer {
 
         let first_dur = streamers.lock().unwrap()[0].get_duration();
 
+        let command_rx = self.command_rx.clone();
+        let paused = self.control.paused_flag();
+        let current_handle: Arc<Mutex<Option<ControlHandle>>> = Arc::new(Mutex::new(None));
+        let ch_clone = Arc::clone(&current_handle);
+        let current_track = Arc::new(AtomicU16::new(0));
+        /*
+        TODO
+
+        Appart form current track(and maybe that is not required)
+        we need to track the finished time of tracks, so we know where to seek to
+        the question is wether to keep the time or samples(so its atomic vs mutex)
+        */
+        thread::spawn(move || -> Result<(), StreamErr> {
+            let cmd_rx = command_rx.ok_or(StreamErr::AlreadyPlaying)?;
+            loop {
+                while paused.load(Ordering::Acquire) {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                let received = cmd_rx.recv();
+                let ch = current_handle.lock().unwrap();
+                match received {
+                    Ok(ControlCommand::Seek(time)) => {
+                        //TODO after a streaming calculations for a playback, send underlying seek
+                        // to a current_handle if there is one, and send there
+                        // calcuate the time based on already passed time
+                    }
+                    Ok(ControlCommand::Stop) => {
+                        if ch.is_some() {
+                            ch.as_ref().unwrap().stop()?;
+                        }
+                    }
+                    Ok(ControlCommand::Rewind) => {}
+                    Ok(ControlCommand::AddGainFunction(gf)) => {
+                        if ch.is_some() {
+                            ch.as_ref().unwrap().add_gain_function(gf)?;
+                        }
+                    }
+                    Ok(ControlCommand::RemoveGainFunction) => {
+                        if ch.is_some() {
+                            ch.as_ref().unwrap().remove_gain_function()?;
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+        });
+
         if fade_secs == 0 || first_dur.is_none() {
-            return thread::spawn(move || {
+            return thread::spawn(move || -> _ {
                 loop_no_crossfade(
                     Arc::clone(&streamers),
                     sender.clone(),
                     player_status.clone(),
                     stream_notifier.clone(),
+                    ch_clone,
                 );
                 Ok(())
             });
@@ -189,11 +244,14 @@ impl Streamer for PlayListStreamer {
 
         let mut mixer = Mixer::new(vec![first], vec![1]);
         mixer.set_normalize_gain(false); // sum complementary fade gains, don't average
+
         let handle = mixer.handle();
+        let mut chl = ch_clone.lock().unwrap();
+        *chl = Some(mixer.control_handle());
 
         let ctx = Arc::new(CrossfadeCtx {
             queue: Arc::clone(&streamers),
-            respawned:Arc::new(Mutex::new(vec![])),
+            respawned: Arc::new(Mutex::new(vec![])),
             handle: handle.clone(),
             fade_type: self.cross_fade_type,
             fade_secs,
@@ -201,7 +259,8 @@ impl Streamer for PlayListStreamer {
         });
 
         let cutoff = first_dur.unwrap().saturating_sub(fade_secs);
-        schedule_crossfade(ctx, first_control, cutoff);
+
+        schedule_crossfade(ctx, first_control, cutoff,Arc::clone(&current_track));
 
         mixer.play(player_status, sender, stream_notifier.clone())
     }
@@ -239,6 +298,9 @@ impl Streamer for PlayListStreamer {
             .iter()
             .map(|s| s.respawn())
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Box::new(PlayListStreamer::new(respawned, self.cross_fade_type)))
+        Ok(Box::new(PlayListStreamer::new(
+            respawned,
+            self.cross_fade_type,
+        )))
     }
 }

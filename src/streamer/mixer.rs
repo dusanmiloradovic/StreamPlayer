@@ -469,6 +469,16 @@ impl Streamer for Mixer {
     }
 
     fn last_seek_position(&self) -> Arc<AtomicU64> {
+        /*
+        Since we can introduce dynamically children, we need to keep track of the whole stream
+        TODO handle the seek commands and save the seek position
+        Also think about the following scenario:
+        I start with couple of streams, play for some time, and then dynamically add a new stream
+        When I call now seek, do I go and set the time of a new stream to be the same as the old ones, or
+        I start from the position it started from when it was added
+        Also , playlist is implemented as mixer underneath, because of this complilcation, let the playlist
+        handle seek directly on child streams not on mixer there
+        */
         Arc::clone(&self.last_seek_position)
     }
 
