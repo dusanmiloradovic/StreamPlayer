@@ -482,16 +482,12 @@ impl Streamer for Mixer {
         Arc::clone(&self.last_seek_position)
     }
 
-    fn get_duration(&self) -> Option<u64> {
-        let mut d: u64 = 0;
-        for s in &self.streamers {
-            if let Some(duration) = s.get_duration() {
-                if duration < d || d == 0 {
-                    d = duration;
-                }
-            }
-        }
-        if d == 0 { None } else { Some(d) }
+    fn get_duration(&self) -> Option<f64> {
+        // the mix ends when the shortest child ends
+        self.streamers
+            .iter()
+            .filter_map(|s| s.get_duration())
+            .reduce(f64::min)
     }
 
     fn respawn(&self) -> Result<Box<dyn Streamer>, StreamErr> {

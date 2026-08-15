@@ -1,21 +1,21 @@
-use crossbeam_channel::{Sender, bounded};
+use crate::stream_player::{PlayerStatus, StreamNotify};
+use crossbeam_channel::{bounded, Sender};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use symphonia::core::codecs::CodecParameters;
-use crate::stream_player::{PlayerStatus, StreamNotify};
 
 pub mod mixer;
 pub mod playlist;
 pub mod single;
 pub mod utils;
-pub (crate) const NO_SEEK: u64 = u64::MAX;
+pub(crate) const NO_SEEK: u64 = u64::MAX;
 
 #[derive(Debug)]
 pub enum StreamErr {
@@ -45,6 +45,8 @@ pub struct StreamerCallbackShared {
     pending_callbacks: Mutex<HashMap<Duration, Box<dyn Fn() + Send>>>,
     callbacks: Mutex<HashMap<u64, Box<dyn Fn() + Send>>>, //once the streamer starts playing it sends the sample rate, so duration can be calculated
     device_output_info: Mutex<Option<DeviceOutputInfo>>, // comes from device, used to convert Duration to number of samples
+    re_entrant_map: Mutex<HashMap<u64, bool>>, // if re-entrant is false, don't put it back when its done
+    pending_re_entrant_map: Mutex<HashMap<Duration, bool>>,
 }
 
 #[derive(Debug)]
@@ -71,7 +73,9 @@ impl StreamerCallbackShared {
             return 0;
         }
         let device_output_info = do_info.unwrap();
-        (d.as_secs_f64() * device_output_info.sample_rate as f64 * device_output_info.channels as f64) as u64
+        (d.as_secs_f64()
+            * device_output_info.sample_rate as f64
+            * device_output_info.channels as f64) as u64
     }
     pub fn new() -> Self {
         Self {
@@ -79,28 +83,79 @@ impl StreamerCallbackShared {
             callbacks: Mutex::new(HashMap::new()),
             device_output_info: Mutex::new(None),
             callback_register: Mutex::new(None),
+            re_entrant_map: Mutex::new(HashMap::new()),
+            pending_re_entrant_map: Mutex::new(HashMap::new()),
         }
     }
     pub fn add_callback(
         &self,
         after: Duration,
         callback: Box<dyn Fn() + Send>,
+        re_entrant: bool,
     ) -> Result<(), StreamerAddError> {
         let cbr = self.callback_register.lock().unwrap();
         match &*cbr {
             None => {
                 let mut pending_callbacks = self.pending_callbacks.lock().unwrap();
                 pending_callbacks.insert(after, callback);
+                self.pending_re_entrant_map
+                    .lock()
+                    .unwrap()
+                    .insert(after, re_entrant);
             }
             Some(cr) => {
                 let mut callbacks = self.callbacks.lock().unwrap();
                 let samples_duration = self.convert_duration_to_samples(after);
                 callbacks.insert(samples_duration, callback);
                 // when there is callback register, there is output info as well (set at streamer), so we can calculate no of samples
+                self.re_entrant_map
+                    .lock()
+                    .unwrap()
+                    .insert(samples_duration, re_entrant);
                 cr.send(samples_duration).unwrap(); //TODO handle this
             }
         }
         Ok(())
+    }
+    pub fn remove_callback(&self, after: Duration) -> Option<(Box<dyn Fn() + Send>, bool)> {
+        let cbr = self.callback_register.lock().unwrap();
+        match &*cbr {
+            None => {
+                if let Some(pc) = self.pending_callbacks.lock().unwrap().remove(&after) {
+                    let re_entrant = {
+                        if let Some(p) = self.pending_re_entrant_map.lock().unwrap().remove(&after)
+                        {
+                            p
+                        } else {
+                            false
+                        }
+                    };
+                    Some((pc, re_entrant))
+                } else {
+                    None
+                }
+            }
+            Some(_) => {
+                let samples_duration = self.convert_duration_to_samples(after);
+                if let Some(pc) = self.callbacks.lock().unwrap().remove(&samples_duration) {
+                    let re_entrant = {
+                        if let Some(p) = self
+                            .re_entrant_map
+                            .lock()
+                            .unwrap()
+                            .remove(&samples_duration)
+                        {
+                            p
+                        } else {
+                            false
+                        }
+                    };
+                    Some((pc, re_entrant))
+                } else {
+                    None
+                }
+            }
+        }
     }
     pub fn set_callback_receiver(
         &self,
@@ -117,24 +172,54 @@ impl StreamerCallbackShared {
                 callbacks.insert(samples_duration, val);
                 callback_register.send(samples_duration).unwrap();
             }
+            let mut pre = self.pending_re_entrant_map.lock().unwrap();
+            let mut re = self.re_entrant_map.lock().unwrap();
+            for (key, val) in pre.drain() {
+                let samples_duration = self.convert_duration_to_samples(key);
+                re.insert(samples_duration, val);
+            }
         }
         *self.callback_register.lock().unwrap() = Some(callback_register);
+
         thread::spawn(move || {
             // captures only `cr`; references SHARED directly
             while let cbr = cr.recv() {
                 match cbr {
                     Ok(Callback::CbOnSample(cb_time)) => {
                         let cb = CALLBACK_SHARED.callbacks.lock().unwrap().remove(&cb_time);
+                        let mut rel = CALLBACK_SHARED.re_entrant_map.lock().unwrap();
+                        let re_entrant = rel.get(&cb_time);
                         if let Some(cb) = cb {
                             cb();
-                            CALLBACK_SHARED.callbacks.lock().unwrap().insert(cb_time, cb);
-                            // TODO add additional re-entrant option fov closure, in which case we will not have this
+                            if let Some(re_entrant) = re_entrant {
+                                if *re_entrant {
+                                    CALLBACK_SHARED
+                                        .callbacks
+                                        .lock()
+                                        .unwrap()
+                                        .insert(cb_time, cb);
+                                } else {
+                                    rel.remove_entry(&cb_time);
+                                }
+                            }
                         }
                     }
                     Err(_) => {} //TODO analyze when this can happen and how to handle error
                 }
             }
         });
+    }
+    pub fn re_schedule(&self, old: Duration, new: Duration) {
+        /*
+               TODO
+               Normally when the seek passes the time for callback, it will NOT be executed
+               This is the problem for cross-fade playlist, and if re-scheduled part was missed, it will break the playlist loop
+               We will manage to handle the position of the samples (that is used for gain function) internally in playlist,
+               So the only thing to deal is the scheduler
+        */
+        if let Some((callback, re_entrant)) = self.remove_callback(old) {
+            self.add_callback(new, callback, re_entrant);
+        }
     }
 }
 
@@ -148,8 +233,9 @@ pub(crate) fn callback_shared() -> &'static StreamerCallbackShared {
 pub fn add_callback(
     after: Duration,
     callback: Box<dyn Fn() + Send>,
+    re_entrant: bool,
 ) -> Result<(), StreamerAddError> {
-    CALLBACK_SHARED.add_callback(after, callback)
+    CALLBACK_SHARED.add_callback(after, callback, re_entrant)
 }
 
 pub enum ControlCommand {
@@ -165,7 +251,7 @@ pub struct StreamerInputInfo {
     track_id: u32,
     pub(crate) channels: u16,
     pub(crate) sample_rate: u32,
-    duration: Option<u64>,
+    duration: Option<f64>, // seconds, fractional part preserved
     codec_params: CodecParameters,
 }
 
@@ -231,7 +317,7 @@ impl ControlHandle {
     }
 
     fn send(&self, command: ControlCommand) -> Result<(), StreamErr> {
-        if self.command_tx.is_full()  {
+        if self.command_tx.is_full() {
             return Err(StreamErr::CommandChannelFull);
         }
         if self.finished.load(Relaxed) {
@@ -259,7 +345,7 @@ pub trait Streamer: Send {
     fn play(
         &mut self,
         //output_info: DeviceOutputInfo,
-        player_status:PlayerStatus, // contains DeviceOutputInfo and also playing times arc atomics
+        player_status: PlayerStatus, // contains DeviceOutputInfo and also playing times arc atomics
         sender: SyncSender<Vec<f32>>,
         stream_notifier: SyncSender<StreamNotify>,
     ) -> JoinHandle<Result<(), StreamErr>>;
@@ -270,11 +356,11 @@ pub trait Streamer: Send {
     /// Cloneable transport-control surface (stop/pause/resume/seek/rewind),
     /// safe to capture in a sample callback.
     fn control_handle(&self) -> ControlHandle;
-    fn get_duration(&self) -> Option<u64>;
+    fn get_duration(&self) -> Option<f64>;
     fn last_seek_position(&self) -> Arc<AtomicU64>;
     fn respawn(&self) -> Result<Box<dyn Streamer>, StreamErr>; // it gives a copy of the streamer
-    // currently it will only be done in playlist. respawn has to be done before streamer is moved, but "activation"
-    // has to be done only when original streamer is finished
+                                                               // currently it will only be done in playlist. respawn has to be done before streamer is moved, but "activation"
+                                                               // has to be done only when original streamer is finished
 }
 
 #[derive(Clone)]

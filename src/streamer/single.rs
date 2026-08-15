@@ -172,7 +172,7 @@ impl SingleStreamer {
         let mut duration = None;
         if let (Some(tb), Some(n_frames)) = (codec_params.time_base, codec_params.n_frames) {
             let t = tb.calc_time(n_frames);
-            duration = Some(t.seconds + t.frac.round() as u64);
+            duration = Some(t.seconds as f64 + t.frac);
         }
         Ok(StreamerInputInfo {
             track_id,
@@ -266,7 +266,7 @@ impl Streamer for SingleStreamer {
                             return Err(StreamErr::SeekError);
                         }
                         let duration_ts = duration.unwrap();
-                        let target = time.min(duration_ts.saturating_sub(1));
+                        let target = (time as f64).min(duration_ts - 1.0).max(0.0);
                         let to = SeekTo::Time {
                             time: Time::from(target),
                             track_id: Some(track_id),
@@ -436,7 +436,7 @@ impl Streamer for SingleStreamer {
         }
     }
 
-    fn get_duration(&self) -> Option<u64> {
+    fn get_duration(&self) -> Option<f64> {
         // TODO this will be moved to the separate handler, see if we can do this, or have only static info
         let ii = self.get_input_info();
         if ii.is_err() {
