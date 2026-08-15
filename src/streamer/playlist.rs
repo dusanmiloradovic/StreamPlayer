@@ -114,6 +114,9 @@ fn build_fades(fade_type: CrossFadeType, fade_samples: usize) -> (FadeFn, FadeFn
     }
 }
 
+// TODO we need to store the last callback time in shared structure
+// and we need to call re_schedule in case of seek
+// (maybe not if its still the same stream and its not yet passed the time for fade out)
 struct CrossfadeCtx {
     queue: Arc<Mutex<Vec<Box<dyn Streamer>>>>,
     respawned: Arc<Mutex<Vec<Box<dyn Streamer>>>>, //in order to play the stream it has to be moved, before that we "respawn" it, and save here in case rewind happens
