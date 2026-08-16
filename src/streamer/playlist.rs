@@ -124,6 +124,7 @@ struct CrossfadeCtx {
     fade_type: CrossFadeType,
     fade_secs: f64,
     fade_samples: usize,
+    next_run: Arc<Mutex<Duration>>, //when there is a seek, we need first to stop the callbacks, we will use this
 }
 
 fn schedule_crossfade(
@@ -133,6 +134,8 @@ fn schedule_crossfade(
     current_pos: Arc<AtomicU16>,
 ) {
     let ctx_cb = Arc::clone(&ctx);
+    let nr = Arc::clone(&ctx.next_run);
+
 
     let curr_poss = Arc::clone(&current_pos);
     let cb: Box<dyn Fn() + Send> = Box::new(move || {
@@ -154,7 +157,7 @@ fn schedule_crossfade(
         let (fade_in, fade_out) = build_fades(ctx_cb.fade_type, ctx_cb.fade_samples);
         let _ = outgoing_control.add_gain_function(fade_out);
         let _ = next_control.add_gain_function(fade_in);
-        ctx_cb.handle.add(next, 1, false);
+         ctx_cb.handle.add(next, 1, false);
         if let Some(d) = next_dur {
             let next_cutoff = cutoff_secs + (d - ctx_cb.fade_secs).max(0.0);
             schedule_crossfade(
@@ -165,7 +168,10 @@ fn schedule_crossfade(
             );
         }
     });
-    let _ = add_callback(Duration::from_secs_f64(cutoff_secs.max(0.0)), cb);
+    let dura=Duration::from_secs_f64(cutoff_secs.max(0.0));
+    let _ = add_callback(  dura, cb);
+    *nr.lock().unwrap()=dura;
+    
 }
 
 impl Streamer for PlayListStreamer {

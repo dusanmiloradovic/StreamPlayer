@@ -14,7 +14,7 @@ use std::thread;
 use std::thread::JoinHandle;
 
 enum MixerCommand {
-    Stop(usize), // stop the nth channel
+    // stop the nth channel
     Add {
         shared_buf: Arc<Mutex<VecDeque<f32>>>,
         index: Arc<AtomicUsize>,
@@ -22,6 +22,8 @@ enum MixerCommand {
         weight: Arc<AtomicU32>,
         control: ControlHandle,
     },
+    Stop(usize),
+    StopAllButLast, //internal command
 }
 
 fn apply_mixer_control(
@@ -150,14 +152,14 @@ impl Mixer {
 
     pub fn add(&mut self, streamer: Box<dyn Streamer>, weight: u32, auto_seek: bool) {
         let weight_arc = Arc::new(AtomicU32::new(weight));
-        let (player_status, stream_notifier)={
+        let (player_status, stream_notifier) = {
             let shared = self.shared.lock().unwrap();
             (shared.player_status.clone(), shared.stream_notifier.clone())
         };
-       
+
         if let Some(cmd_tx) = &self.command_tx
-            && player_status.is_some()  &&
-            stream_notifier.is_some()
+            && player_status.is_some()
+            && stream_notifier.is_some()
         {
             let ps = player_status.unwrap();
             let sn = stream_notifier.unwrap();
@@ -195,7 +197,7 @@ impl Mixer {
         let control = streamer.control_handle();
 
         let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-       streamer.play(player_status, inner_sender, stream_notifier.clone());
+        streamer.play(player_status, inner_sender, stream_notifier.clone());
         if auto_seek {
             //TODO need to get the current position of the player first, and then seek
         }
@@ -271,6 +273,21 @@ impl MixerHandle {
         let shared = self.shared.lock().unwrap();
         if let Some(tx) = &shared.command_tx {
             tx.send(MixerCommand::Stop(ch_no)).unwrap_or(());
+        }
+    }
+    pub(crate) fn add_stop_others(
+        &self,
+        streamer: Box<dyn Streamer>,
+        weight: u32,
+        auto_seek: bool,
+    ) {
+        // this is for now only for playlist. When the seek command in playlist discovers it should seek
+        // outside the bounds of current streamer (that are live in mixer)
+        // instead of stopping and re-creating the mixer again, it will just add a new streamer and stop the existing ones
+        self.add(streamer, weight, auto_seek);
+        let shared = self.shared.lock().unwrap();
+        if let Some(tx) = &shared.command_tx {
+            tx.send(MixerCommand::StopAllButLast).unwrap_or(());
         }
     }
 }
@@ -434,6 +451,14 @@ impl Streamer for Mixer {
                                 finished_flags.push(finished);
                                 weights.push(weight);
                                 children_control.push(control);
+                            }
+                            MixerCommand::StopAllButLast =>{
+                                let len = finished_flags.len();
+                                for (i,f) in finished_flags.iter().enumerate(){
+                                    if i!=len-1{
+                                        f.store(true,Relaxed);
+                                    }
+                                }
                             }
                         }
                     }
