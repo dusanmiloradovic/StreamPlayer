@@ -266,7 +266,7 @@ impl Streamer for SingleStreamer {
                             return Err(StreamErr::SeekError);
                         }
                         let duration_ts = duration.unwrap();
-                        let target = (time as f64).min(duration_ts - 1.0).max(0.0);
+                        let target = time.min(duration_ts - 1.0).max(0.0);
                         let to = SeekTo::Time {
                             time: Time::from(target),
                             track_id: Some(track_id),

@@ -24,7 +24,7 @@ fn play_single_streamer() {
     .unwrap();
     let control_handle = s3.control_handle();
     let ch = control_handle.clone();
-    ch.seek(45).unwrap();
+    ch.seek(45.0).unwrap();
 
     let mut player = stream_player::new_stream_player(Box::new(s3), BitRateInfo::Streamer).unwrap();
     let status = player.status();
@@ -43,7 +43,7 @@ fn play_single_streamer() {
             println!("Callback from single after ,{} seconds", (ms2 - ms) / 1000);
             let play_time = status.get_play_time_ms();
             println!("Play time: from player {}", play_time / 1000f32);
-            control_handle.seek(15).unwrap();
+            control_handle.seek(15.0).unwrap();
 
         }),
     )

@@ -38,6 +38,7 @@ pub enum StreamErr {
     ProbeError,
     SeekError,
     StreamerFinished,
+    SeekNotSupported,
 }
 
 pub struct StreamerCallbackShared {
@@ -240,7 +241,7 @@ pub fn add_callback(
 
 pub enum ControlCommand {
     Stop,
-    Seek(u64),
+    Seek(f64),
     Rewind,
     AddGainFunction(Arc<dyn Fn(usize) -> f32 + Send + Sync>),
     RemoveGainFunction,
@@ -308,7 +309,7 @@ impl ControlHandle {
         self.send(ControlCommand::Stop)
     }
 
-    pub fn seek(&self, time: u64) -> Result<(), StreamErr> {
+    pub fn seek(&self, time: f64) -> Result<(), StreamErr> {
         self.send(ControlCommand::Seek(time))
     }
 
