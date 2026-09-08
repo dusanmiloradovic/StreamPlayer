@@ -266,7 +266,13 @@ impl Streamer for SingleStreamer {
                             return Err(StreamErr::SeekError);
                         }
                         let duration_ts = duration.unwrap();
-                        let target = time.min(duration_ts - 1.0).max(0.0);
+                        // Back off a hair from the exact end: mp4's stts lookup uses a strict `>`
+                        // and mp3 has no upper bound at all, so seeking to exactly `duration` runs
+                        // off the end and surfaces as IoError(UnexpectedEof) rather than
+                        // SeekError(OutOfRange). 50ms covers a frame plus encoder delay for every
+                        // codec we enable.
+                        const END_EPSILON: f64 = 0.05;
+                        let target = time.clamp(0.0, (duration_ts - END_EPSILON).max(0.0));
                         let to = SeekTo::Time {
                             time: Time::from(target),
                             track_id: Some(track_id),

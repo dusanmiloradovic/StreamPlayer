@@ -24,6 +24,8 @@ enum MixerCommand {
     },
     Stop(usize),
     StopAllButLast, //internal command
+    SeekChild(usize,f64),
+    RewindChild(usize),
 }
 
 fn apply_mixer_control(
@@ -40,6 +42,25 @@ fn apply_mixer_control(
             true
         }
         ControlCommand::Seek(time) => {
+            //Mixer seeking is problematic
+            // it can happen that the child was added dynamically, so when seek is issued, should it seek form the beginning of that track
+            // or since it was added?
+            // also because of the dynamic nature, the track length will change, so it will not match the
+            // child track length
+            // IMO best is to error out on seek here, and instead
+            // give a separate Mixer Command where a user can seek/rewind the child
+
+            // TODO after the analysis it is possible to seek the mixer, in the following way:
+            // we need to keep track of the start time of each track. For a static mixer
+            // all start times are 0
+            // when we dymamically add track, we need to query the player to get the current play time
+            // and that will be the start time of the new track
+
+            // TODO important
+            // the above comment works well for forward seek, but for backward seek things get complicated
+            // this should be implemented in the next version, and for the time being just throw an
+            // unsupported operation error
+
             for c in children {
                 // let _ = c.seek(time);
             }
@@ -460,6 +481,8 @@ impl Streamer for Mixer {
                                     }
                                 }
                             }
+                            MixerCommand::SeekChild(child_no, time) =>{}
+                            MixerCommand::RewindChild(child_no) => {}
                         }
                     }
                     recv(control_rx) -> command => {
@@ -493,6 +516,14 @@ impl Streamer for Mixer {
         self.control.clone()
     }
 
+    fn get_duration(&self) -> Option<f64> {
+        // the mix ends when the shortest child ends
+        self.streamers
+            .iter()
+            .filter_map(|s| s.get_duration())
+            .reduce(f64::min)
+    }
+
     fn last_seek_position(&self) -> Arc<AtomicU64> {
         /*
         Since we can introduce dynamically children, we need to keep track of the whole stream
@@ -503,16 +534,11 @@ impl Streamer for Mixer {
         I start from the position it started from when it was added
         Also , playlist is implemented as mixer underneath, because of this complilcation, let the playlist
         handle seek directly on child streams not on mixer there
+
+        !! IMPORTANT already mentioned in another comment how to handle seek for children
+        TODO check how last_seek_position is used
         */
         Arc::clone(&self.last_seek_position)
-    }
-
-    fn get_duration(&self) -> Option<f64> {
-        // the mix ends when the shortest child ends
-        self.streamers
-            .iter()
-            .filter_map(|s| s.get_duration())
-            .reduce(f64::min)
     }
 
     fn respawn(&self) -> Result<Box<dyn Streamer>, StreamErr> {

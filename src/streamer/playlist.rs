@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use crate::stream_player::BitRateInfo::Streamer;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum CrossFadeType {
@@ -139,6 +138,9 @@ fn schedule_crossfade(
     cutoff_secs: f64,
     current_pos: Arc<AtomicU16>,
 ) {
+    // TODO Mixer should handle the "respawn" in the same way it handles here
+    // for non-crossfaded streams.
+    // seek then will be just the seek on mixer
     let ctx_cb = Arc::clone(&ctx);
     let nr = Arc::clone(&ctx.next_run);
 
@@ -224,7 +226,7 @@ impl Streamer for PlayListStreamer {
                 }
                 let received = cmd_rx.recv();
                 let ch = current_handle.lock().unwrap();
-                let strmrs =  Arc::clone(&streamers);
+                let strmrs = Arc::clone(&streamers);
                 match received {
                     Ok(ControlCommand::Seek(time)) => {
                         //TODO after a streaming calculations for a playback, send underlying seek
@@ -232,54 +234,65 @@ impl Streamer for PlayListStreamer {
                         // calcuate the time based on already passed time
 
                         if let Some(ch) = ch_seek_clone.lock().unwrap().as_ref() {
-                           // ch.stop()?;
+                            // ch.stop()?;
                             // first this will be done only for no crossfade
                             if mixer_handle.is_none() {
                                 stopped_no_crossfade_loop.store(true, Ordering::Relaxed);
                                 let psf = *played_finished_so_far.lock().unwrap();
                                 let mut time = time - psf;
                                 let mut sought_streamer = 0usize;
-                                let mut prev_time=time;
+                                let mut prev_sought_streamer = 0usize;
+                                let mut prev_time = time;
                                 if time < 0f64 {
                                     // TODO backward search
                                 } else {
-                                    while time>0f64{
-                                        prev_time=time;
-                                        let dur={
+                                    while time > 0f64 {
+                                        prev_time = time;
+                                        prev_sought_streamer = sought_streamer;
+                                        let dur = {
                                             let lck = strmrs.lock().unwrap();
                                             let curr = lck.get(sought_streamer);
-                                            if curr.is_none(){
+                                            if curr.is_none() {
                                                 // shouldn't happen, but just in case
                                                 println!("no streamer for {}", sought_streamer);
-                                                sought_streamer +=1;
+                                                sought_streamer += 1;
                                                 break;
-                                            }
-                                            else{
+                                            } else {
                                                 curr.unwrap().get_duration()
                                             }
                                         };
-                                        if dur.is_none(){
+                                        if dur.is_none() {
                                             return Err(StreamErr::SeekNotSupported);
                                         }
                                         time -= dur.unwrap();
+                                        sought_streamer += 1;
                                     }
                                     time = prev_time;
+                                    sought_streamer = prev_sought_streamer;
+                                    //when we reach here, the time left should be sent to the child seek command
                                     ch.stop()?;
                                     // TODO don't do this if the index is 0, meaning seek is in the current handle
                                     // right now even for this its stopping and moving back
                                     let mut r_q = respawned_streamers_clone.lock().unwrap();
                                     let mut s_q = strmrs.lock().unwrap();
-                                    let mut rl =r_q.len();
-                                    while rl>=sought_streamer{
-                                        let v = r_q.pop();
-                                        if v.is_none(){
-                                            break;
-                                        }
-                                        s_q.insert(0, v.unwrap());
-                                        rl-=1;
+                                    let mut rl = r_q.len();
+                                    // TODO this is wrong (below), I should insert into respawned and drain current for this case
+                                    // above case its like this
+                                    // while rl>=sought_streamer{
+                                    //     let v = r_q.pop();
+                                    //     if v.is_none(){
+                                    //         break;
+                                    //     }
+                                    //     s_q.insert(0, v.unwrap());
+                                    //     rl-=1;
+                                    // }
+                                    while sought_streamer > 0 {
+                                        let s = s_q.remove(0);
+                                        r_q.insert(0, s);
+                                        sought_streamer -= 1;
                                     }
 
-                                     //TODO adjust played so far (psf below)
+                                    //TODO adjust played so far (psf below)
                                     loop_no_crossfade(
                                         Arc::clone(&streamers),
                                         sender.clone(),
@@ -292,7 +305,8 @@ impl Streamer for PlayListStreamer {
                                     )
                                 }
                             } else {
-                                // TODO do for
+                                // Mixer should handle this in the same way
+                                // we should just pass seek command to mixer
                             }
                         }
                     }
