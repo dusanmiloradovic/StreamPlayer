@@ -61,6 +61,9 @@ fn apply_mixer_control(
             // this should be implemented in the next version, and for the time being just throw an
             // unsupported operation error
 
+
+            // TODO also important, think about what to do with relative indexes when seeking, do I reset them
+            // all to 0 or not?
             for c in children {
                 // let _ = c.seek(time);
             }
@@ -171,34 +174,16 @@ impl Mixer {
         }
     }
 
-    pub fn add(&mut self, streamer: Box<dyn Streamer>, weight: u32, auto_seek: bool) {
-        let weight_arc = Arc::new(AtomicU32::new(weight));
-        let (player_status, stream_notifier) = {
-            let shared = self.shared.lock().unwrap();
-            (shared.player_status.clone(), shared.stream_notifier.clone())
-        };
-
-        if let Some(cmd_tx) = &self.command_tx
-            && player_status.is_some()
-            && stream_notifier.is_some()
-        {
-            let ps = player_status.unwrap();
-            let sn = stream_notifier.unwrap();
-            Self::add_live(
-                cmd_tx,
-                self.sync_sender.as_ref().unwrap(),
-                &self.play_position,
-                streamer,
-                Arc::clone(&weight_arc),
-                auto_seek,
-                ps.clone(),
-                sn.clone(),
-            );
-            self.weights.push(weight_arc);
-        } else {
-            self.streamers.push(streamer);
-            self.weights.push(weight_arc);
-        }
+    /// Appends a channel before playback starts, as an incremental alternative to
+    /// passing everything to `new`. Once `play` has been called the mixer is owned
+    /// by the player and unreachable as `&mut self`; use `MixerHandle::add` instead.
+    pub fn add(&mut self, streamer: Box<dyn Streamer>, weight: u32) {
+        debug_assert!(
+            self.command_tx.is_none(),
+            "Mixer::add is pre-play only; use MixerHandle::add once playing"
+        );
+        self.streamers.push(streamer);
+        self.weights.push(Arc::new(AtomicU32::new(weight)));
     }
 
     fn add_live(
@@ -221,6 +206,8 @@ impl Mixer {
         streamer.play(player_status, inner_sender, stream_notifier.clone());
         if auto_seek {
             //TODO need to get the current position of the player first, and then seek
+            // Maybe forget about auto-seek, it is getting too complicated
+            // when reason about dynamic streams adding
         }
 
         let sb = Arc::clone(&shared_buf);
@@ -327,10 +314,14 @@ impl Streamer for Mixer {
         self.sync_sender = Some(sync_sender.clone());
 
         // Publish channels to the shared state so MixerHandle can use them.
+        // player_status and stream_notifier must be published too: without them
+        // MixerHandle::add's guard never matches and it silently drops the streamer.
         {
             let mut shared = self.shared.lock().unwrap();
             shared.command_tx = self.command_tx.clone();
             shared.sync_sender = self.sync_sender.clone();
+            shared.player_status = Some(player_status.clone());
+            shared.stream_notifier = Some(stream_notifier.clone());
         }
 
         // These Vecs are owned exclusively by the mixing thread. The Add command
@@ -464,6 +455,8 @@ impl Streamer for Mixer {
                                 if let Some(flag) = finished_flags.get(ch_no) {
                                     flag.store(true, Relaxed);
                                     shared_bufs[ch_no].take(); // reclaim buffer memory
+                                    //TODO maybe remove this to keep it simple
+                                    // only keep it if the memory use is not rising significantly
                                 }
                             }
                             MixerCommand::Add { shared_buf, index, finished, weight, control } => {

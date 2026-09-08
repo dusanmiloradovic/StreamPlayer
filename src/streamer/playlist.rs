@@ -307,6 +307,12 @@ impl Streamer for PlayListStreamer {
                             } else {
                                 // Mixer should handle this in the same way
                                 // we should just pass seek command to mixer
+                                // TODO: Important: in case we seek forward
+                                // and the absoulte number of streamers in a mixer
+                                // (including the past ones) is less, we need to
+                                // add a streamer to the mixer
+                                // (add to repawned_streamers, since its already being played)
+                                // Probably need some kind of high water mark for comparison
                             }
                         }
                     }
