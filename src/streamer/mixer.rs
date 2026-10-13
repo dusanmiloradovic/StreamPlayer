@@ -353,7 +353,7 @@ impl Streamer for Mixer {
                     sb.lock().unwrap().extend(samples.iter().copied());
                     ix.fetch_add(samples.len(), AcqRel);
                     ss.send(j).unwrap_or(());
-                }
+                } // should I mark the stream as stopped?
             });
 
             indices.push(index);

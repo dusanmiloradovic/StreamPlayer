@@ -356,7 +356,7 @@ impl Streamer for SingleStreamer {
 
                 let packet = match format.next_packet() {
                     Ok(packet) => {
-                        if (seek_pending) {
+                        if seek_pending  {
                             let ts = packet.ts;
                             seek_pending = false;
                             resampled_len = 0;

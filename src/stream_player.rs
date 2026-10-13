@@ -396,4 +396,13 @@ impl PlayerStatus {
     pub fn channels(&self) -> u16 {
         self.device_output_info.channels
     }
+    pub fn get_media_elapsed_samples(&self) -> u64 {
+        self.media_elapsed_samples.load(Relaxed)
+    }
+    pub fn get_media_play_time_ms(&self) -> f32 {
+        let elapsed_samples=   self.media_elapsed_samples.load(Relaxed);
+                elapsed_samples as f32
+            / (self.device_output_info.sample_rate as f32 * self.device_output_info.channels as f32)
+            * 1000.0
+    }
 }
