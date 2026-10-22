@@ -340,7 +340,8 @@ impl Streamer for Mixer {
         let mut children_control: Vec<ControlHandle> = Vec::new();
         let respawned_streamers: Arc<Mutex<Vec<Box<dyn Streamer>>>> = Arc::new(Mutex::new(vec![]));
 
-        for (s, w) in self.streamers.iter_mut().zip(self.weights.iter()) {
+        for (sref, w) in self.streamers.iter().zip(self.weights.iter()) {
+            let mut s= sref.respawn()?;
             let index = Arc::new(AtomicUsize::new(0));
             let shared_buf = Arc::new(Mutex::new(VecDeque::new()));
             let finished = s.finished_flag();
