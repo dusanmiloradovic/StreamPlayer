@@ -5,7 +5,7 @@ use crate::streamer::{
 };
 use crossbeam_channel::{Sender, bounded, select};
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize};
 use std::sync::mpsc::SyncSender;
@@ -26,6 +26,9 @@ enum MixerCommand {
     StopAllButLast, //internal command
     SeekChild(usize,f64),
     RewindChild(usize),
+    Pause(usize), // I need this even though it can be paused without a command to store the commands in case of rewind(so they need to be replayed)
+    //TODO think about pausing, the issue is if its rewinded, and we pause, the question is what next
+    //I maybe just unpause if its rewinded, and thats it.
 }
 
 fn apply_mixer_control(
@@ -90,6 +93,8 @@ fn apply_mixer_control(
     }
 }
 
+// I am keeping the streamers below in the struct intact, and before playing I am respawing. We don't need to keep a separate list of Streamers like we are doing now in playlist.rs
+// We will get the streamers by index from the vector when required
 pub struct Mixer {
     streamers: Vec<Box<dyn Streamer>>,
     weights: Vec<Arc<AtomicU32>>,
@@ -109,6 +114,8 @@ pub struct Mixer {
     // where the per-channel fade gains already sum to ~unity.
     normalize_gain: bool,
     last_seek_position: Arc<AtomicU64>,
+    streamer_map: Arc<Mutex<BTreeMap<u64, Vec<usize>>>>,// the key is the timing when streamer is activated, keep an index to the streamer in vector. We can have multiple streamers at the same time, thats why we have vector (like at 0 when mixer is initiated)
+    offset_map: Arc<Mutex<BTreeMap<usize,u64>>>, // instead of keeping the commands, I will "unpause" everything on rewind. Stopped streams will remained stopped, and here we will keep just the offset, so the child stream is rewind if required
 }
 
 struct MixerShared {
@@ -198,7 +205,7 @@ impl Mixer {
     ) {
         let current_pos = play_position.load(Relaxed);
         let shared_buf = Arc::new(Mutex::new(VecDeque::new()));
-        let index = Arc::new(AtomicUsize::new(current_pos));
+        let index: Arc<std::sync::atomic::AtomicUsize> = Arc::new(AtomicUsize::new(current_pos));
         let finished = streamer.finished_flag();
         let control = streamer.control_handle();
 
@@ -331,6 +338,7 @@ impl Streamer for Mixer {
         let mut finished_flags: Vec<Arc<AtomicBool>> = Vec::new();
         let mut weights: Vec<Arc<AtomicU32>> = Vec::new();
         let mut children_control: Vec<ControlHandle> = Vec::new();
+        let respawned_streamers: Arc<Mutex<Vec<Box<dyn Streamer>>>> = Arc::new(Mutex::new(vec![]));
 
         for (s, w) in self.streamers.iter_mut().zip(self.weights.iter()) {
             let index = Arc::new(AtomicUsize::new(0));
