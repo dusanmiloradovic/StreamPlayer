@@ -341,7 +341,7 @@ impl Streamer for Mixer {
         let respawned_streamers: Arc<Mutex<Vec<Box<dyn Streamer>>>> = Arc::new(Mutex::new(vec![]));
 
         for (sref, w) in self.streamers.iter().zip(self.weights.iter()) {
-            let mut s= sref.respawn()?;
+            let mut s= sref.respawn().unwrap(); // TODO check respawning, and see if it can return Box in all the cases (since it will store just static data)
             let index = Arc::new(AtomicUsize::new(0));
             let shared_buf = Arc::new(Mutex::new(VecDeque::new()));
             let finished = s.finished_flag();
