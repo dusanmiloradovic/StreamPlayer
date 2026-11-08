@@ -10,6 +10,7 @@ use std::io::ErrorKind::UnexpectedEof;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::Ordering::Acquire;
 use std::sync::mpsc::SyncSender;
 use std::thread;
 use std::thread::JoinHandle;
@@ -255,8 +256,14 @@ impl Streamer for SingleStreamer {
             let mut seek_pending = false;
 
             loop {
+                if finished.load(Acquire){
+                    return Ok(());
+                }
                 while paused.load(std::sync::atomic::Ordering::Acquire) {
                     thread::sleep(std::time::Duration::from_millis(10));
+                    if finished.load(Acquire) {
+                        return Ok(());
+                    }
                 }
 
                 match cmd_rx.try_recv() {
