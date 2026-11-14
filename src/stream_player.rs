@@ -19,6 +19,9 @@ pub struct StreamPlayerImpl {
     elapsed_samples: Arc<AtomicU64>,
     media_elapsed_samples: Arc<AtomicU64>, // this is set with seek, and it will be used in callbacks.
     //TODO next version both elapsed_samples and media_elapsed_samples will be used in callbacks. (depending on config)
+    //TODO think about whether media_elapsed_samples is just a complication
+    // we can keep the position of the elapsed samples in the streamers themselves, and rely on the play time
+    // if we want dynamically to add streamers, that we need to rely on elapsed_samples and internal diff
     next_sample_callback: Arc<AtomicU64>,
     sample_callbacks: Arc<Mutex<BTreeSet<u64>>>,
     device_output_info: DeviceOutputInfo,

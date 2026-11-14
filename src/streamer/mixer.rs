@@ -12,6 +12,7 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
+use symphonia::core::units::Duration;
 
 enum MixerCommand {
     // stop the nth channel
@@ -132,6 +133,19 @@ struct MixerShared {
 pub struct MixerHandle {
     shared: Arc<Mutex<MixerShared>>,
     play_position: Arc<AtomicUsize>,
+}
+
+//this should keep all the required streamer elements
+//most importangly, it keeps the position relative to the mixer
+//and the relative position of the child
+// for example if {pos:2, rel_pos:3}, this element is added to the mixer after 2s, and its rewinded to 3s
+// the position is relative to the play time of the mixer (not the player)
+// so if there was rewind , the position should be adjusted as well
+struct MixerStreamerElement{
+    streamer: Box<dyn Streamer>,
+    pos: Duration,
+    rel_pos: Duration,
+    weight: u32,
 }
 
 impl Mixer {
@@ -339,6 +353,8 @@ impl Streamer for Mixer {
         let mut weights: Vec<Arc<AtomicU32>> = Vec::new();
         let mut children_control: Vec<ControlHandle> = Vec::new();
         let respawned_streamers: Arc<Mutex<Vec<Box<dyn Streamer>>>> = Arc::new(Mutex::new(vec![]));
+        let player_elapsed_samples = player_status.elapsed_samples.clone();
+        // we need to measure positions against player elapsed samples, the callbacks will be in absoulute play time
 
         for (sref, w) in self.streamers.iter().zip(self.weights.iter()) {
             let mut s= sref.respawn().unwrap(); // TODO check respawning, and see if it can return Box in all the cases (since it will store just static data)

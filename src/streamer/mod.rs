@@ -1,5 +1,5 @@
 use crate::stream_player::{PlayerStatus, StreamNotify};
-use crossbeam_channel::{bounded, Sender};
+use crossbeam_channel::{Sender, bounded};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -61,11 +61,13 @@ impl Default for StreamerCallbackShared {
     }
 }
 
-// TODO The callbacks timing are based on the play time, not on the clock time
-// With seek functionality strime   can go back in time, so we need to disinguish
-// will the callback be called again, or its one time only
-// also we need to give the option for absolute play time vs media play time(if it was played for n minutes vs execute on 3. minute of stream)
-// 1 will for now implement just media time callbacks that are re-entrant(i need that for playlists)
+/*
+Callbacs are based on the play time, not on media time.
+If the user initiates Seek FW or BW, that will not affect the timing (it is still based on the play time , more precise player play time)
+ */
+
+// TODO Add the flag to distinguish the callbacks as system and user
+// so all the system callbacks can be removed when required
 
 impl StreamerCallbackShared {
     fn convert_duration_to_samples(&self, d: Duration) -> u64 {
@@ -160,7 +162,7 @@ impl StreamerCallbackShared {
     }
     pub fn set_callback_receiver(
         &self,
-        mut cr: Receiver<Callback>,
+        cr: Receiver<Callback>,
         callback_register: SyncSender<u64>,
         device_output_info: DeviceOutputInfo,
     ) {
@@ -219,7 +221,8 @@ impl StreamerCallbackShared {
                So the only thing to deal is the scheduler
         */
         if let Some((callback, re_entrant)) = self.remove_callback(old) {
-            self.add_callback(new, callback, re_entrant);
+            self.add_callback(new, callback, re_entrant)
+                .expect("TODO: panic message");
         }
     }
 }
@@ -237,6 +240,23 @@ pub fn add_callback(
     re_entrant: bool,
 ) -> Result<(), StreamerAddError> {
     CALLBACK_SHARED.add_callback(after, callback, re_entrant)
+}
+
+pub fn remove_callback(after: Duration) -> Option<(Box<dyn Fn() + Send>, bool)> {
+    CALLBACK_SHARED.remove_callback(after)
+}
+
+pub fn remove_all_callbacks() {
+    // TODO this will remove ALL the callbacks, we need a separate function that remove just all the system callbacks
+    let mut mg1 = CALLBACK_SHARED.pending_callbacks.lock().unwrap();
+    mg1.clear();
+    let mut mg2 = CALLBACK_SHARED.callbacks.lock().unwrap();
+    mg2.clear();
+    let mut mg3 = CALLBACK_SHARED.re_entrant_map.lock().unwrap();
+    mg3.clear();
+    let mut mg4 = CALLBACK_SHARED.pending_re_entrant_map.lock().unwrap();
+    mg4.clear();
+
 }
 
 pub enum ControlCommand {
@@ -360,8 +380,8 @@ pub trait Streamer: Send {
     fn get_duration(&self) -> Option<f64>;
     fn last_seek_position(&self) -> Arc<AtomicU64>;
     fn respawn(&self) -> Result<Box<dyn Streamer>, StreamErr>; // it gives a copy of the streamer
-                                                               // currently it will only be done in playlist. respawn has to be done before streamer is moved, but "activation"
-                                                               // has to be done only when original streamer is finished
+    // currently it will only be done in playlist. respawn has to be done before streamer is moved, but "activation"
+    // has to be done only when original streamer is finished
 }
 
 #[derive(Clone)]
