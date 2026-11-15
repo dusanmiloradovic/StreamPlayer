@@ -52,7 +52,6 @@ fn loop_no_crossfade(
     streamer_queue: Arc<Mutex<Vec<Box<dyn Streamer>>>>,
     sender: SyncSender<Vec<f32>>,
     player_status: PlayerStatus,
-    stream_notifier: SyncSender<StreamNotify>,
     current_handle: Arc<Mutex<Option<ControlHandle>>>, //instead of creating another listner thread, we operate on underlying streamer from the main command thread in play
     played_so_far: Arc<Mutex<f64>>,
     passed_streams: Arc<Mutex<Vec<Box<dyn Streamer>>>>,
@@ -82,7 +81,7 @@ fn loop_no_crossfade(
     let sender_clone = sender.clone();
     let ps_clone = player_status.clone();
     let dur = current.get_duration();
-    let handle = current.play(player_status, sender, stream_notifier.clone());
+    let handle = current.play(player_status, sender);
     if let Err(some) = handle.join().unwrap() {
         println!("Error: {:?}", some);
         return; // TODO work on the error type return from joinhandle
@@ -96,7 +95,6 @@ fn loop_no_crossfade(
         Arc::clone(&streamer_queue),
         sender_clone,
         ps_clone,
-        stream_notifier.clone(),
         ch_new,
         Arc::clone(&played_so_far),
         Arc::clone(&passed_streams),
@@ -186,7 +184,6 @@ impl Streamer for PlayListStreamer {
         // output_info: DeviceOutputInfo,
         player_status: PlayerStatus,
         sender: SyncSender<Vec<f32>>,
-        stream_notifier: SyncSender<StreamNotify>,
     ) -> JoinHandle<Result<(), StreamErr>> {
         let output_info = player_status.device_output_info;
         let streamers = Arc::clone(&self.streamers);
@@ -297,7 +294,6 @@ impl Streamer for PlayListStreamer {
                                         Arc::clone(&streamers),
                                         sender.clone(),
                                         player_status.clone(),
-                                        stream_notifier.clone(),
                                         ch_clone,
                                         psf,
                                         Arc::clone(&respawned_streamers),
@@ -345,7 +341,6 @@ impl Streamer for PlayListStreamer {
                     Arc::clone(&streamers),
                     sender.clone(),
                     player_status.clone(),
-                    stream_notifier.clone(),
                     ch_clone,
                     psf,
                     Arc::clone(&respawned_streamers),
@@ -387,7 +382,7 @@ impl Streamer for PlayListStreamer {
 
         schedule_crossfade(ctx, first_control, cutoff, Arc::clone(&current_track));
 
-        mixer.play(player_status, sender, stream_notifier.clone())
+        mixer.play(player_status, sender)
     }
 
     fn get_input_info(&self) -> Result<Cow<'_, StreamerInputInfo>, StreamErr> {

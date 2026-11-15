@@ -19,7 +19,7 @@ use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error;
 use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 
-use crate::stream_player::{PlayerStatus, StreamNotify};
+use crate::stream_player::PlayerStatus;
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::{Hint, ProbeResult};
@@ -191,7 +191,6 @@ impl Streamer for SingleStreamer {
         //output_info: DeviceOutputInfo,
         player_status: PlayerStatus,
         sender: SyncSender<Vec<f32>>,
-        stream_notifier: SyncSender<StreamNotify>,
     ) -> JoinHandle<Result<(), StreamErr>> {
         let output_info = player_status.device_output_info.clone();
         self.output_info = Some(output_info);
@@ -259,7 +258,7 @@ impl Streamer for SingleStreamer {
                 if finished.load(Acquire){
                     return Ok(());
                 }
-                while paused.load(std::sync::atomic::Ordering::Acquire) {
+                while paused.load(Acquire) {
                     thread::sleep(std::time::Duration::from_millis(10));
                     if finished.load(Acquire) {
                         return Ok(());
@@ -304,9 +303,6 @@ impl Streamer for SingleStreamer {
                                         std::sync::atomic::Ordering::Relaxed,
                                     );
                                     // last_seek_position.store(secs, std::sync::atomic::Ordering::Relaxed);
-                                    if stream_notifier.send(StreamNotify::Seek(secs)).is_err() {
-                                        println!("Failed to notify streamer of seek position");
-                                    }
                                 } else {
                                     return Err(StreamErr::SeekError);
                                 }
@@ -372,9 +368,6 @@ impl Streamer for SingleStreamer {
                                 let secs = time.seconds as f64 + time.frac;
                                 last_seek_position
                                     .store(time.seconds, std::sync::atomic::Ordering::Relaxed);
-                                if stream_notifier.send(StreamNotify::Seek(secs)).is_err() {
-                                    println!("Failed to notify streamer of seek position");
-                                }
                             }
                         }
                         packet
@@ -383,7 +376,7 @@ impl Streamer for SingleStreamer {
                         finished.store(true, std::sync::atomic::Ordering::Relaxed);
                         return Err(StreamErr::UnknownError);
                     }
-                    Err(Error::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    Err(Error::IoError(err)) if err.kind() == UnexpectedEof => {
                         finished.store(true, std::sync::atomic::Ordering::Relaxed);
                         return Ok(());
                     }
@@ -431,14 +424,6 @@ impl Streamer for SingleStreamer {
         })
     }
 
-    fn finished_flag(&self) -> Arc<AtomicBool> {
-        self.control.finished_flag()
-    }
-
-    fn control_handle(&self) -> ControlHandle {
-        self.control.clone()
-    }
-
     fn get_input_info(&self) -> Result<Cow<'_, StreamerInputInfo>, StreamErr> {
         if let Some(input_info) = &self.streamer_input_info {
             Ok(Cow::Borrowed(input_info))
@@ -449,6 +434,18 @@ impl Streamer for SingleStreamer {
         }
     }
 
+    fn get_output_info(&self) -> Option<DeviceOutputInfo> {
+        self.output_info.clone()
+    }
+
+    fn finished_flag(&self) -> Arc<AtomicBool> {
+        self.control.finished_flag()
+    }
+
+    fn control_handle(&self) -> ControlHandle {
+        self.control.clone()
+    }
+
     fn get_duration(&self) -> Option<f64> {
         // TODO this will be moved to the separate handler, see if we can do this, or have only static info
         let ii = self.get_input_info();
@@ -456,10 +453,6 @@ impl Streamer for SingleStreamer {
             return None;
         }
         ii.unwrap().duration
-    }
-
-    fn get_output_info(&self) -> Option<DeviceOutputInfo> {
-        self.output_info.clone()
     }
 
     fn last_seek_position(&self) -> Arc<AtomicU64> {

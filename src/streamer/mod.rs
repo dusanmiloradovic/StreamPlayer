@@ -368,7 +368,6 @@ pub trait Streamer: Send {
         //output_info: DeviceOutputInfo,
         player_status: PlayerStatus, // contains DeviceOutputInfo and also playing times arc atomics
         sender: SyncSender<Vec<f32>>,
-        stream_notifier: SyncSender<StreamNotify>,
     ) -> JoinHandle<Result<(), StreamErr>>;
     fn get_input_info(&self) -> Result<Cow<'_, StreamerInputInfo>, StreamErr>;
     // TODO *decoded.spec.rate holds always the decoded sample rate, maybe use that as alternative

@@ -1,5 +1,5 @@
 use crate::streamer::Callback::CbOnSample;
-use crate::streamer::{Callback, DeviceOutputInfo, NO_SEEK, callback_shared};
+use crate::streamer::{Callback, DeviceOutputInfo, callback_shared};
 use crate::streamer::{StreamErr, Streamer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{StreamError, SupportedStreamConfig, default_host};
@@ -17,11 +17,6 @@ pub struct StreamPlayerImpl {
     paused: Arc<AtomicBool>,
     command_sender: Option<mpsc::Sender<StreamCommand>>,
     elapsed_samples: Arc<AtomicU64>,
-    media_elapsed_samples: Arc<AtomicU64>, // this is set with seek, and it will be used in callbacks.
-    //TODO next version both elapsed_samples and media_elapsed_samples will be used in callbacks. (depending on config)
-    //TODO think about whether media_elapsed_samples is just a complication
-    // we can keep the position of the elapsed samples in the streamers themselves, and rely on the play time
-    // if we want dynamically to add streamers, that we need to rely on elapsed_samples and internal diff
     next_sample_callback: Arc<AtomicU64>,
     sample_callbacks: Arc<Mutex<BTreeSet<u64>>>,
     device_output_info: DeviceOutputInfo,
@@ -41,7 +36,7 @@ fn push_with_backpressure(producer: &mut ringbuf::HeapProd<f32>, data: &[f32]) {
         let pushed = producer.push_slice(&data[offset..]);
         offset += pushed;
         if offset < data.len() {
-            thread::sleep(std::time::Duration::from_millis(5));
+            thread::sleep(Duration::from_millis(5));
         }
     }
 }
@@ -123,7 +118,6 @@ impl StreamPlayerImpl {
             paused: Arc::new(AtomicBool::new(false)),
             command_sender: None,
             elapsed_samples: Arc::new(AtomicU64::new(0)),
-            media_elapsed_samples: Arc::new(AtomicU64::new(0)),
             next_sample_callback: Arc::new(AtomicU64::new(0)),
             sample_callbacks: Arc::new(Mutex::new(BTreeSet::new())),
             last_seek_position,
@@ -142,7 +136,6 @@ impl StreamPlayerImpl {
         let (mut producer, mut consumer) = HeapRb::<f32>::new(ring_size).split();
 
         let (command_tx, command_rx) = mpsc::channel::<StreamCommand>();
-        let (notifer_tx, notifer_rx) = mpsc::sync_channel::<StreamNotify>(8);
         let (callback_register_tx, callback_register_rx) = mpsc::sync_channel::<u64>(8);
         let (callback_sender, callback_receiver) = mpsc::sync_channel::<Callback>(8);
 
@@ -151,7 +144,6 @@ impl StreamPlayerImpl {
         // the streamers themselves are registering the callbacks
 
         self.command_sender = Some(command_tx);
-        let streamer_last_seek_position = Arc::clone(&self.last_seek_position);
 
         // Drains the channel into the ring buffer; after the channel closes, waits
         // for the ring buffer to drain before signalling the cpal keepalive thread.
@@ -159,13 +151,12 @@ impl StreamPlayerImpl {
         let paused = Arc::clone(&self.paused);
         let stopped = Arc::new(AtomicBool::new(false));
         let passed_callbacks: Arc<Mutex<BTreeSet<u64>>> = Arc::new(Mutex::new(BTreeSet::new()));
-        let pending_seek_buffer_clear = Arc::new(AtomicU64::new(NO_SEEK));
         // we need to clear the buffer on seek and set the position in data_callback to avoid race condition
 
         // since we can go back and forth in time we need to keep the passed callbacks and insert them into sample_callbacks when required
         thread::spawn(move || {
             while paused.load(Relaxed) {
-                thread::sleep(std::time::Duration::from_millis(10));
+                thread::sleep(Duration::from_millis(10));
                 // on some platforms, stream.pause() is not working (that is a hardware limitation)
             }
             while let Ok(samples) = receiver.recv() {
@@ -198,77 +189,9 @@ impl StreamPlayerImpl {
                 }
             }
         });
-        let dio = self.device_output_info;
-        let sample_rate = dio.sample_rate;
-        let channels = dio.channels;
-       // let seek_media_counter = Arc::clone(&self.media_elapsed_samples);
-        let nse = Arc::clone(&self.next_sample_callback);
-        //let passed_callbacks = Arc::clone(&self.passed_callbacks);
-        let psd = Arc::clone(&passed_callbacks);
-        let smpl = Arc::clone(&self.sample_callbacks);
-        let pending_seek_buffer_clear = Arc::clone(&pending_seek_buffer_clear);
-        let psb = Arc::clone(&pending_seek_buffer_clear);
-        // We need to adjust media counter from another thread (data_callback)
-        thread::spawn(move || {
-            while let Ok(notification) = notifer_rx.recv() {
-                if let StreamNotify::Seek(secs) = notification {
-                    let mut psdl = psd.lock().unwrap();
-                    let mut smpl = smpl.lock().unwrap();
 
-                    if streamer_last_seek_position.load(Relaxed) != NO_SEEK {
-                        streamer_last_seek_position.store(NO_SEEK, Relaxed);
-                        // there will be multiple streamers notifying , only the main one will be effective
-                        // but we need to reset this
-                        let new_media_samples_pos = (channels as f64 * sample_rate as f64 * secs) as u64;
-                        pending_seek_buffer_clear.store(new_media_samples_pos, Relaxed);
-                       // seek_media_counter.store(new_media_samples_pos, Relaxed);
-                        // In the audio thread (data_callback) we will set the counter, that is where its increased
-                        //NOW handle th eposition
-                        let next_counter = nse.load(Relaxed);
-                       // let smc = seek_media_counter.load(Relaxed);
-                        let smc = new_media_samples_pos;
-                        if next_counter <= smc {
-                            // already passed the triggering time
-                            nse.store(0, Relaxed);
-                            let mut del_vec: Vec<u64> = Vec::new(); //smpl.iter is immutable borrow,cant remove while looping
-                            for &s in smpl.iter() {
-                                if s < smc {
-                                    del_vec.push(s);
-                                    psdl.insert(s);
-                                }
-                                if s >= smc && nse.load(Relaxed) == 0 {
-                                    del_vec.push(s);
-                                    nse.store(s, Relaxed);
-                                }
-                            }
-                            for &s in del_vec.iter() {
-                                smpl.remove(&s);
-                            }
-                        } else {
-                            let mut del_vec: Vec<u64> = Vec::new();
-                            nse.store(0, Relaxed);
-                            for &p in psdl.iter() {
-                                if p >= smc {
-                                    if nse.load(Relaxed) == 0 {
-                                        nse.store(p, Relaxed);
-                                    } else {
-                                        smpl.insert(p);
-                                    }
-                                    del_vec.push(p);
-                                }
-                            }
-                            for &s in del_vec.iter() {
-                                psdl.remove(&s);
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        // this is a standalone thread for calling callbacks
-        //  let counter = Arc::clone(&self.elapsed_samples);
+        let counter = Arc::clone(&self.elapsed_samples);
         // TODO  callbacks also based on absolute play time (counter instead of media_counter)
-        let media_counter = Arc::clone(&self.media_elapsed_samples);
         let nse = Arc::clone(&self.next_sample_callback);
         let sample_callbacks = Arc::clone(&self.sample_callbacks);
         let stp1 = Arc::clone(&stopped);
@@ -281,7 +204,7 @@ impl StreamPlayerImpl {
                     continue;
                 }
                 let target = nse.load(Relaxed);
-                if target != 0 && media_counter.load(Relaxed) >= target {
+                if target != 0 && counter.load(Relaxed) >= target {
                     callback_sender.send(CbOnSample(target)).ok();
                     let next = sample_callbacks.lock().unwrap().pop_first();
                     nse.store(next.unwrap_or(0), Relaxed);
@@ -293,22 +216,13 @@ impl StreamPlayerImpl {
         });
 
         let counter = Arc::clone(&self.elapsed_samples);
-        let media_counter = Arc::clone(&self.media_elapsed_samples);
 
 
         let data_callback = move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            // claim the pending seek in a single RMW; a plain load/store pair would let
-            // a second seek slip in between and be consumed without clearing the buffer
-            let seek_to = psb.swap(NO_SEEK, Relaxed);
-            if seek_to != NO_SEEK {
-                consumer.clear();
-                media_counter.store(seek_to, Relaxed); // resync after the clear, not before
-            }
             for sample in out.iter_mut() {
                 *sample = consumer.try_pop().unwrap_or(0.0);
             }
             counter.fetch_add(out.len() as u64, Relaxed);
-            media_counter.fetch_add(out.len() as u64, Relaxed);
         };
         let err_fn = |err: StreamError| eprintln!("stream error: {err}");
         let device = default_host()
@@ -329,7 +243,7 @@ impl StreamPlayerImpl {
         let stpd = Arc::clone(&stopped);
         let handle = thread::spawn(move || {
             if let Err(e) = streamer
-                .play(status, sender, notifer_tx)
+                .play(status, sender)
                 .join()
                 .unwrap_or(Err(StreamErr::UnknownError))
             {
@@ -372,7 +286,6 @@ impl StreamPlayerImpl {
         PlayerStatus {
             elapsed_samples: Arc::clone(&self.elapsed_samples),
             device_output_info: self.device_output_info,
-            media_elapsed_samples: Arc::clone(&self.media_elapsed_samples)
         }
     }
 }
@@ -380,7 +293,6 @@ impl StreamPlayerImpl {
 #[derive(Clone)]
 pub struct PlayerStatus {
     pub elapsed_samples: Arc<AtomicU64>,
-    pub media_elapsed_samples: Arc<AtomicU64>,
     pub device_output_info: DeviceOutputInfo,
 }
 
@@ -399,13 +311,8 @@ impl PlayerStatus {
     pub fn channels(&self) -> u16 {
         self.device_output_info.channels
     }
-    pub fn get_media_elapsed_samples(&self) -> u64 {
-        self.media_elapsed_samples.load(Relaxed)
-    }
-    pub fn get_media_play_time_ms(&self) -> f32 {
-        let elapsed_samples=   self.media_elapsed_samples.load(Relaxed);
-                elapsed_samples as f32
-            / (self.device_output_info.sample_rate as f32 * self.device_output_info.channels as f32)
-            * 1000.0
+    pub fn get_elapsed_samples(&self) -> u64 {
+        self.elapsed_samples.load(Relaxed)
     }
 }
+

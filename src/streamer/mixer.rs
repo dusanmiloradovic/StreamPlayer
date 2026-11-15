@@ -123,7 +123,6 @@ struct MixerShared {
     command_tx: Option<Sender<MixerCommand>>,
     sync_sender: Option<Sender<usize>>,
     player_status: Option<PlayerStatus>,
-    stream_notifier: Option<SyncSender<StreamNotify>>,
 }
 
 /// A handle to a `Mixer` that can be retained by the caller after the `Mixer`
@@ -172,7 +171,6 @@ impl Mixer {
                 command_tx: None,
                 sync_sender: None,
                 player_status,
-                stream_notifier: None,
             })),
             normalize_gain: true,
             last_seek_position: Arc::new(AtomicU64::new(NO_SEEK)),
@@ -327,7 +325,6 @@ impl Streamer for Mixer {
         // output_info: DeviceOutputInfo,
         player_status: PlayerStatus,
         sender: SyncSender<Vec<f32>>,
-        stream_notifier: SyncSender<StreamNotify>,
     ) -> JoinHandle<Result<(), StreamErr>> {
         let (sync_sender, sync_receiver) = bounded::<usize>(8);
         let (cmd_tx, cmd_rx) = bounded::<MixerCommand>(4);
@@ -342,7 +339,6 @@ impl Streamer for Mixer {
             shared.command_tx = self.command_tx.clone();
             shared.sync_sender = self.sync_sender.clone();
             shared.player_status = Some(player_status.clone());
-            shared.stream_notifier = Some(stream_notifier.clone());
         }
 
         // These Vecs are owned exclusively by the mixing thread. The Add command
@@ -364,7 +360,7 @@ impl Streamer for Mixer {
             let control = s.control_handle();
 
             let (inner_sender, inner_receiver) = mpsc::sync_channel::<Vec<f32>>(8);
-            s.play(player_status.clone(), inner_sender, stream_notifier.clone());
+            s.play(player_status.clone(), inner_sender);
 
             let ix = Arc::clone(&index);
             let sb = Arc::clone(&shared_buf);
