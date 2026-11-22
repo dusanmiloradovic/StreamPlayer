@@ -30,6 +30,7 @@ enum MixerCommand {
     Pause(usize), // I need this even though it can be paused without a command to store the commands in case of rewind(so they need to be replayed)
     //TODO think about pausing, the issue is if its rewinded, and we pause, the question is what next
     //I maybe just unpause if its rewinded, and thats it.
+    AddChild(Box<dyn Streamer>, u32, Option<Duration>),// if none the receiver shall add it now, and not schedule it (called from add_live)
 }
 
 fn apply_mixer_control(
@@ -259,6 +260,8 @@ impl Mixer {
             .unwrap_or(());
     }
 
+
+
     pub fn stop_channel(&self, ch_no: usize) {
         if let Some(tx) = &self.command_tx {
             tx.send(MixerCommand::Stop(ch_no)).unwrap_or(());
@@ -287,6 +290,7 @@ impl MixerHandle {
             &shared.player_status,
             &shared.stream_notifier,
         ) {
+            //TODO this should add to the vector, also we should mind the offset time (the timing when it was called)
             let weight_arc = Arc::new(AtomicU32::new(weight));
             Mixer::add_live(
                 cmd_tx,
@@ -298,6 +302,17 @@ impl MixerHandle {
                 player_status.clone(),
                 stream_notifier.clone(),
             );
+            cmd_tx.send(MixerCommand::AddChild(streamer, weight, None)).unwrap_or(());
+        }
+    }
+
+    fn schedule_add(&self, streamer: Box<dyn Streamer>, weight: u32, when: Duration){
+        //TODO this will add to the streamer_elements_mut, but will not call add, instead that will be scheduled
+        //the question is should that be scheduled in "mixer media time" or "player absolute time"
+        //for the time being let it be mixer time(media time)
+        let shared = self.shared.lock().unwrap();
+        if let Some(cmd_tx) = &shared.command_tx {
+            cmd_tx.send(MixerCommand::AddChild(streamer, weight, Some(when))).unwrap_or(());
         }
     }
 
@@ -498,6 +513,12 @@ impl Streamer for Mixer {
                                 }
                             }
                             MixerCommand::Add { shared_buf, index, finished, weight, control } => {
+                                // here i need to
+                                // 1. get the media play time
+                                // 2. add to the streamer_elements_mut
+                                // 3. get the option to add with the offset, (we call fwd on child)
+
+                                //maybe not here, but in add_live
                                 shared_bufs.push(Some(shared_buf));
                                 indices.push(index);
                                 finished_flags.push(finished);
