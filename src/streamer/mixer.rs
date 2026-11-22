@@ -525,6 +525,9 @@ impl Streamer for Mixer {
                                 weights.push(weight);
                                 children_control.push(control);
                             }
+                            MixerCommand::AddChild(streamer, weight, when) =>{
+                               // TODO add to vector and do the scheduling
+                            }
                             MixerCommand::StopAllButLast =>{
                                 let len = finished_flags.len();
                                 for (i,f) in finished_flags.iter().enumerate(){
