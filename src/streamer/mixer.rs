@@ -336,7 +336,7 @@ impl Streamer for Mixer {
         self.command_tx = Some(cmd_tx);
         self.sync_sender = Some(sync_sender.clone());
 
-        let mut streamer_elements: Vec<_> = self.streamers.drain(..)
+        let streamer_elements: Vec<_> = self.streamers.drain(..)
             .enumerate()
             .map(|(ix, streamer)| MixerStreamerElement {
                 streamer,
@@ -398,6 +398,8 @@ impl Streamer for Mixer {
             weights.push(Arc::clone(w));
             children_control.push(control);
         }
+
+        let  streamer_elements_mut = Arc::new(Mutex::new(streamer_elements));
 
         let finished = self.control.finished_flag();
         let stopped = Arc::clone(&self.stopped);
