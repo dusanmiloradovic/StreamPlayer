@@ -160,6 +160,8 @@ fn schedule_crossfade(
         let next_dur = next.get_duration();
         let next_control = next.control_handle();
         let (fade_in, fade_out) = build_fades(ctx_cb.fade_type, ctx_cb.fade_samples);
+        // TODO check what happens when this is added to mixer, and the mixer controls the forward/rewind
+        // Does forward/rewind on single control will adjust the number of samples so this will still be ok
         let _ = outgoing_control.add_gain_function(fade_out);
         let _ = next_control.add_gain_function(fade_in);
         ctx_cb.handle.add(next, 1, false);

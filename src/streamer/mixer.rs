@@ -144,11 +144,16 @@ struct MixerStreamerElement{
     streamer: Box<dyn Streamer>,
     pos: Duration,
     rel_pos: Duration,
-    weight: u32,
+   // weight: u32, // weights can be changed dynamically, so that is kept separate, this whole structure
+   // should be immutable
+    ix: usize, // still not sure if this is needed. The point is that we want to reuse the arrays
+    // like the shared_bufs, once it is the Streamer is finished, and we rewind it should be played again
+    // and the same slot reused.
 }
 
 impl Mixer {
     pub fn new(streamers: Vec<Box<dyn Streamer>>, weights: Vec<u32>) -> Self {
+        // so far if i want another timing(not 0), it has to be done with the add, not in constructor
         if weights.len() != streamers.len() {
             panic!("weights and streamers must have the same length");
         }
@@ -331,6 +336,16 @@ impl Streamer for Mixer {
         self.command_tx = Some(cmd_tx);
         self.sync_sender = Some(sync_sender.clone());
 
+        let mut streamer_elements: Vec<_> = self.streamers.drain(..)
+            .enumerate()
+            .map(|(ix, streamer)| MixerStreamerElement {
+                streamer,
+                pos: 0,
+                rel_pos: 0,
+                ix,
+            })
+            .collect();
+
         // Publish channels to the shared state so MixerHandle can use them.
         // player_status and stream_notifier must be published too: without them
         // MixerHandle::add's guard never matches and it silently drops the streamer.
@@ -352,8 +367,8 @@ impl Streamer for Mixer {
         let player_elapsed_samples = player_status.elapsed_samples.clone();
         // we need to measure positions against player elapsed samples, the callbacks will be in absoulute play time
 
-        for (sref, w) in self.streamers.iter().zip(self.weights.iter()) {
-            let mut s= sref.respawn().unwrap(); // TODO check respawning, and see if it can return Box in all the cases (since it will store just static data)
+        for (sref, w) in streamer_elements.iter().zip(self.weights.iter()) {
+            let mut s= sref.streamer.respawn().unwrap(); // TODO check respawning, and see if it can return Box in all the cases (since it will store just static data)
             let index = Arc::new(AtomicUsize::new(0));
             let shared_buf = Arc::new(Mutex::new(VecDeque::new()));
             let finished = s.finished_flag();
